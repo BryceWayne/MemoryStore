@@ -7,11 +7,10 @@ import (
 )
 
 type item struct {
-	value     interface{}
+	value     []byte // Raw data as a byte slice
 	expiresAt time.Time
 }
 
-// MemoryStore is a simple in-memory key-value store
 type MemoryStore struct {
 	mu         sync.RWMutex
 	store      map[string]item
@@ -21,13 +20,11 @@ type MemoryStore struct {
 
 func NewMemoryStore() *MemoryStore {
 	ctx, cancel := context.WithCancel(context.Background())
-	store := &MemoryStore{
+	return &MemoryStore{
 		store:      make(map[string]item),
 		ctx:        ctx,
 		cancelFunc: cancel,
 	}
-	store.startCleanupWorker()
-	return store
 }
 
 // Add a method to stop the background worker
@@ -60,28 +57,28 @@ func (m *MemoryStore) cleanupExpiredItems() {
 	}
 }
 
-// Set a value in the store
-func (m *MemoryStore) Set(key string, value interface{}, duration time.Duration) {
+func (m *MemoryStore) Set(key string, value []byte, duration time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
 	m.store[key] = item{
 		value:     value,
 		expiresAt: time.Now().Add(duration),
 	}
 }
 
-// Get a value from the store
-func (m *MemoryStore) Get(key string) (interface{}, bool) {
+func (m *MemoryStore) Get(key string) ([]byte, bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	item, exists := m.store[key]
-	if !exists || time.Now().After(item.expiresAt) {
-		return nil, false
+
+	it, exists := m.store[key]
+	if !exists || time.Now().After(it.expiresAt) {
+		return nil, false, nil
 	}
-	return item.value, true
+
+	return it.value, true, nil
 }
 
-// Delete a value from the store
 func (m *MemoryStore) Delete(key string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -1,49 +1,59 @@
 package main
 
 import (
+	"encoding/json"
 	"log"
 	"time"
 
 	"github.com/BryceWayne/MemoryStore/memorystore"
+	"github.com/google/uuid"
 )
+
+// Person struct to be used as an example data structure.
+type Person struct {
+	Name string
+	Age  int
+	UID  string
+}
 
 func main() {
 	ms := memorystore.NewMemoryStore()
-	defer ms.Stop()
+	defer ms.Stop() // Ensure MemoryStore is properly stopped when main exits.
 
-	key1 := "key1"
-	expiration := 5 * time.Second // Set expiration time
+	expiration := 1 * time.Second
 
-	// Set value with expiration
-	ms.Set(key1, "value1", expiration)
-	log.Println("INFO: Value set with expiration of 5 seconds")
+	// Serialize data before storing
+	person := Person{
+		Name: "Alice",
+		Age:  30,
+		UID:  uuid.New().String(),
+	}
+	personKey := person.UID
+	personBytes, _ := json.Marshal(person) // Handle error appropriately
+	ms.Set(personKey, personBytes, expiration)
 
-	// Attempt to retrieve the value immediately
-	if item, exists := ms.Get(key1); exists {
-		if value, ok := item.(string); ok {
-			log.Printf("INFO: MemoryStore - Retrieved value: %s for key: %s\n", value, key1)
-		} else {
-			log.Printf("ERROR: MemoryStore - Incorrect type for value of key: %s\n", key1)
+	// Retrieve and deserialize data
+	if data, exists, _ := ms.Get(personKey); exists {
+		var retrievedPerson Person
+		if err := json.Unmarshal(data, &retrievedPerson); err != nil {
+			log.Printf("Error: %v", err)
 		}
+
+		log.Printf("INFO: MemoryStore - Retrieved person: %+v\n", retrievedPerson)
 	}
 
-	// Wait for the value to expire
+	// Wait for the stored item to expire.
 	log.Println("INFO: Waiting for value to expire...")
-	time.Sleep(expiration + 1*time.Second) // Wait for longer than the expiration time
+	time.Sleep(expiration + 1*time.Second)
 
-	// Attempt to retrieve the value after expiration
-	if _, exists := ms.Get(key1); !exists {
-		log.Printf("INFO: MemoryStore - Value expired for key: %s\n", key1)
+	// Attempt to retrieve the value after it should have expired.
+	if _, exists, _ := ms.Get(personKey); !exists {
+		log.Printf("INFO: MemoryStore - Value expired for key: %s\n", personKey)
 	}
 
-	// Cleanup example
-	ms.Delete(key1)
-	if _, exists := ms.Get(key1); !exists {
-		log.Printf("INFO: MemoryStore - Value manually deleted for key: %s\n", key1)
-	}
-
-	// Non-existent key example
-	if _, exists := ms.Get("key2"); !exists {
-		log.Printf("ERROR: MemoryStore - Value does not exist for key: %s\n", "key2")
+	// Check retrieval for a key that was never set.
+	nonExistentKey := "nonExistentKey"
+	if _, exists, _ := ms.Get(nonExistentKey); !exists {
+		log.Printf("ERROR: MemoryStore - Value does not exist for key: %s\n", nonExistentKey)
 	}
 }

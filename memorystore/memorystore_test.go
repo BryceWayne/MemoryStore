@@ -12,19 +12,24 @@ func TestMemoryStore_SetGet(t *testing.T) {
 
     key := "key1"
     value := "value1"
-    expiration := 5 * time.Second
+    expiration := 1 * time.Second
 
-    ms.Set(key, value, expiration)
+    if err := ms.Set(key, value, expiration); err != nil {
+        t.Fatalf("Set failed: %v", err)
+    }
 
     // Test immediate retrieval
-    retrievedValue, exists := ms.Get(key)
+    retrievedValue, exists, err := ms.Get(key)
+    if err != nil {
+        t.Fatalf("Get failed: %v", err)
+    }
     if !exists || retrievedValue != value {
         t.Errorf("expected %v, got %v", value, retrievedValue)
     }
 
     // Test retrieval after expiration
     time.Sleep(expiration + time.Second)
-    _, exists = ms.Get(key)
+    _, exists, _ = ms.Get(key) // Ignoring error for simplicity
     if exists {
         t.Error("expected value to be expired and not exist")
     }
@@ -37,10 +42,13 @@ func TestMemoryStore_Delete(t *testing.T) {
 
     key := "key1"
     value := "value1"
-    ms.Set(key, value, 5*time.Minute)
+
+    if err := ms.Set(key, value, 5*time.Minute); err != nil {
+        t.Fatalf("Set failed: %v", err)
+    }
 
     ms.Delete(key)
-    _, exists := ms.Get(key)
+    _, exists, _ := ms.Get(key) // Ignoring error for simplicity
     if exists {
         t.Error("expected value to be deleted")
     }
@@ -55,11 +63,13 @@ func TestMemoryStore_CleanupWorker(t *testing.T) {
     value := "value1"
     shortExpiration := 1 * time.Second
 
-    ms.Set(key, value, shortExpiration)
+    if err := ms.Set(key, value, shortExpiration); err != nil {
+        t.Fatalf("Set failed: %v", err)
+    }
 
-    time.Sleep(shortExpiration + 2*time.Second) // wait for item to expire and for cleanup worker to run
+    time.Sleep(shortExpiration + 1*time.Second) // wait for item to expire and for cleanup worker to run
 
-    _, exists := ms.Get(key)
+    _, exists, _ := ms.Get(key) // Ignoring error for simplicity
     if exists {
         t.Error("expected expired value to be cleaned up by the worker")
     }
