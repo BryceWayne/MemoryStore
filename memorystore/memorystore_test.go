@@ -1,6 +1,7 @@
 package memorystore
 
 import (
+    "encoding/json"
     "testing"
     "time"
 )
@@ -14,15 +15,26 @@ func TestMemoryStore_SetGet(t *testing.T) {
     value := "value1"
     expiration := 1 * time.Second
 
-    if err := ms.Set(key, value, expiration); err != nil {
-        t.Fatalf("Set failed: %v", err)
+    // Serialize the value to a byte slice
+    valueBytes, err := json.Marshal(value)
+    if err != nil {
+        t.Fatalf("Failed to marshal value: %v", err)
     }
 
+    // Call Set method without expecting a return value
+    ms.Set(key, valueBytes, expiration)
+
     // Test immediate retrieval
-    retrievedValue, exists, err := ms.Get(key)
+    retrievedBytes, exists, err := ms.Get(key)
     if err != nil {
         t.Fatalf("Get failed: %v", err)
     }
+
+    var retrievedValue string
+    if err := json.Unmarshal(retrievedBytes, &retrievedValue); err != nil {
+        t.Fatalf("Failed to unmarshal retrieved value: %v", err)
+    }
+
     if !exists || retrievedValue != value {
         t.Errorf("expected %v, got %v", value, retrievedValue)
     }
@@ -43,9 +55,14 @@ func TestMemoryStore_Delete(t *testing.T) {
     key := "key1"
     value := "value1"
 
-    if err := ms.Set(key, value, 5*time.Minute); err != nil {
-        t.Fatalf("Set failed: %v", err)
+    // Serialize the value to a byte slice
+    valueBytes, err := json.Marshal(value)
+    if err != nil {
+        t.Fatalf("Failed to marshal value: %v", err)
     }
+
+    // Call Set method without expecting a return value
+    ms.Set(key, valueBytes, 5*time.Minute)
 
     ms.Delete(key)
     _, exists, _ := ms.Get(key) // Ignoring error for simplicity
@@ -63,9 +80,14 @@ func TestMemoryStore_CleanupWorker(t *testing.T) {
     value := "value1"
     shortExpiration := 1 * time.Second
 
-    if err := ms.Set(key, value, shortExpiration); err != nil {
-        t.Fatalf("Set failed: %v", err)
+    // Serialize the value to a byte slice
+    valueBytes, err := json.Marshal(value)
+    if err != nil {
+        t.Fatalf("Failed to marshal value: %v", err)
     }
+
+    // Call Set method without expecting a return value
+    ms.Set(key, valueBytes, shortExpiration)
 
     time.Sleep(shortExpiration + 1*time.Second) // wait for item to expire and for cleanup worker to run
 
