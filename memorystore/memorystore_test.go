@@ -22,7 +22,10 @@ func TestMemoryStore_SetGet(t *testing.T) {
     }
 
     // Call Set method without expecting a return value
-    ms.Set(key, valueBytes, expiration)
+    err = ms.Set(key, valueBytes, expiration)
+    if err != nil {
+        t.Fatalf("Set failed: %v", err)
+    }
 
     // Test immediate retrieval
     retrievedBytes, exists, err := ms.Get(key)
@@ -62,7 +65,10 @@ func TestMemoryStore_Delete(t *testing.T) {
     }
 
     // Call Set method without expecting a return value
-    ms.Set(key, valueBytes, 5*time.Minute)
+    err = ms.Set(key, valueBytes, 5*time.Minute)
+    if err != nil {
+        t.Fatalf("Set failed: %v", err)
+    }
 
     ms.Delete(key)
     _, exists, _ := ms.Get(key) // Ignoring error for simplicity

@@ -57,7 +57,7 @@ func (m *MemoryStore) cleanupExpiredItems() {
 	}
 }
 
-func (m *MemoryStore) Set(key string, value []byte, duration time.Duration) {
+func (m *MemoryStore) Set(key string, value []byte, duration time.Duration) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -65,6 +65,8 @@ func (m *MemoryStore) Set(key string, value []byte, duration time.Duration) {
 		value:     value,
 		expiresAt: time.Now().Add(duration),
 	}
+
+	return nil
 }
 
 func (m *MemoryStore) Get(key string) ([]byte, bool, error) {

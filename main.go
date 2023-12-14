@@ -30,7 +30,10 @@ func main() {
 	}
 	personKey := person.UID
 	personBytes, _ := json.Marshal(person) // Handle error appropriately
-	ms.Set(personKey, personBytes, expiration)
+	err := ms.Set(personKey, personBytes, expiration)
+	if err != nil {
+		log.Fatalf("ERROR: MemoryStore - Error: %v", err)
+	}
 
 	// Retrieve and deserialize data
 	if data, exists, _ := ms.Get(personKey); exists {
