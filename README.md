@@ -17,7 +17,7 @@ MemoryStore accepts `[]byte` as values, accommodating various serialization meth
 
 ```go
 import (
-    "encoding/json"
+    "github.com/goccy/go-json" // Recommended for added performance in JSON serialization
     "log"
     "time"
 
