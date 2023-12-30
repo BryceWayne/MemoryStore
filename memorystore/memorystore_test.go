@@ -1,9 +1,10 @@
 package memorystore
 
 import (
-    "encoding/json"
     "testing"
     "time"
+
+    "github.com/goccy/go-json"
 )
 
 // TestMemoryStore_SetGet tests the Set and Get methods of MemoryStore
