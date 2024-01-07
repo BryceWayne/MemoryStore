@@ -69,16 +69,16 @@ func (m *MemoryStore) Set(key string, value []byte, duration time.Duration) erro
 	return nil
 }
 
-func (m *MemoryStore) Get(key string) ([]byte, bool, error) {
+func (m *MemoryStore) Get(key string) ([]byte, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	it, exists := m.store[key]
 	if !exists || time.Now().After(it.expiresAt) {
-		return nil, false, nil
+		return nil, false
 	}
 
-	return it.value, true, nil
+	return it.value, true
 }
 
 func (m *MemoryStore) Delete(key string) {

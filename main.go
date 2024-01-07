@@ -37,7 +37,7 @@ func main() {
 	}
 
 	// Retrieve and deserialize data
-	if data, exists, _ := ms.Get(personKey); exists {
+	if data, exists := ms.Get(personKey); exists {
 		var retrievedPerson Person
 		if err := json.Unmarshal(data, &retrievedPerson); err != nil {
 			log.Printf("Error: %v", err)
@@ -51,13 +51,13 @@ func main() {
 	time.Sleep(expiration + 1*time.Second)
 
 	// Attempt to retrieve the value after it should have expired.
-	if _, exists, _ := ms.Get(personKey); !exists {
+	if _, exists := ms.Get(personKey); !exists {
 		log.Printf("INFO: MemoryStore - Value expired for key: %s\n", personKey)
 	}
 
 	// Check retrieval for a key that was never set.
 	nonExistentKey := "nonExistentKey"
-	if _, exists, _ := ms.Get(nonExistentKey); !exists {
+	if _, exists := ms.Get(nonExistentKey); !exists {
 		log.Printf("ERROR: MemoryStore - Value does not exist for key: %s\n", nonExistentKey)
 	}
 }

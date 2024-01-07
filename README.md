@@ -1,6 +1,7 @@
 # 🚀 MemoryStore: The Speedy In-Memory 🗂 Key-Value Store 🛠️
 
-MemoryStore is an ultra-fast, in-memory key-value database developed in Go, emphasizing rapid data access, simple integration, and robust thread-safe operations. It excels in handling byte-slice data with flexible serialization options.
+MemoryStore is an ultra-fast, in-memory key-value database developed in Go, emphasizing rapid data access, simple integration, and robust thread-safe operations.
+It excels in handling byte-slice data with flexible serialization options.
 
 ## Quick Start
 
@@ -13,7 +14,8 @@ cd MemoryStore
 
 ## How to Use
 
-MemoryStore accepts `[]byte` as values, accommodating various serialization methods (JSON, gob, protobuf, etc.). Here's a quick guide to integrate MemoryStore into your Go application:
+MemoryStore accepts `[]byte` as values, accommodating various serialization methods (JSON, gob, protobuf, etc.).
+Here's a quick guide to integrate MemoryStore into your Go application:
 
 ```go
 import (
@@ -43,7 +45,7 @@ func main() {
     ms.Set("yourKey", serializedData, 10*time.Second)
 
     // Retrieve and use the data
-    if data, found, _ := ms.Get("yourKey"); found {
+    if data, found := ms.Get("yourKey"); found {
         var yourData YourData
         if err := json.Unmarshal(data, &yourData); err != nil {
             log.Fatal(err)

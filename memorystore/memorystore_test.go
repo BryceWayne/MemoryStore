@@ -29,9 +29,9 @@ func TestMemoryStore_SetGet(t *testing.T) {
     }
 
     // Test immediate retrieval
-    retrievedBytes, exists, err := ms.Get(key)
-    if err != nil {
-        t.Fatalf("Get failed: %v", err)
+    retrievedBytes, exists := ms.Get(key)
+    if !exists {
+        t.Error("expected value to exist")
     }
 
     var retrievedValue string
@@ -45,7 +45,7 @@ func TestMemoryStore_SetGet(t *testing.T) {
 
     // Test retrieval after expiration
     time.Sleep(expiration + time.Second)
-    _, exists, _ = ms.Get(key) // Ignoring error for simplicity
+    _, exists = ms.Get(key) // Ignoring error for simplicity
     if exists {
         t.Error("expected value to be expired and not exist")
     }
@@ -72,7 +72,7 @@ func TestMemoryStore_Delete(t *testing.T) {
     }
 
     ms.Delete(key)
-    _, exists, _ := ms.Get(key) // Ignoring error for simplicity
+    _, exists := ms.Get(key) // Ignoring error for simplicity
     if exists {
         t.Error("expected value to be deleted")
     }
@@ -98,7 +98,7 @@ func TestMemoryStore_CleanupWorker(t *testing.T) {
 
     time.Sleep(shortExpiration + 1*time.Second) // wait for item to expire and for cleanup worker to run
 
-    _, exists, _ := ms.Get(key) // Ignoring error for simplicity
+    _, exists := ms.Get(key) // Ignoring error for simplicity
     if exists {
         t.Error("expected expired value to be cleaned up by the worker")
     }
