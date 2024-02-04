@@ -20,11 +20,13 @@ type MemoryStore struct {
 
 func NewMemoryStore() *MemoryStore {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &MemoryStore{
+	ms := &MemoryStore{
 		store:      make(map[string]item),
 		ctx:        ctx,
 		cancelFunc: cancel,
 	}
+	ms.startCleanupWorker()
+	return ms
 }
 
 // Add a method to stop the background worker
