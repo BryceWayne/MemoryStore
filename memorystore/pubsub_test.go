@@ -2,6 +2,7 @@
 package memorystore
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -153,6 +154,7 @@ func TestMemoryStore_MultipleSubscribers(t *testing.T) {
 	pattern := "test:*"
 	subscribers := 5
 	message := []byte("test message")
+	timeout := time.After(2 * time.Second) // Add timeout
 
 	var channels []<-chan []byte
 	var wg sync.WaitGroup
@@ -186,8 +188,9 @@ func TestMemoryStore_MultipleSubscribers(t *testing.T) {
 					receivedCount++
 					mu.Unlock()
 				}
-			case <-time.After(100 * time.Millisecond):
-				// Timeout
+			case <-timeout:
+				// Timeout - don't block forever
+				t.Error("Timeout waiting for message")
 			}
 		}(channels[i])
 	}
@@ -198,53 +201,77 @@ func TestMemoryStore_MultipleSubscribers(t *testing.T) {
 		t.Fatalf("Publish() error = %v", err)
 	}
 
-	wg.Wait()
+	// Wait with timeout
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Success
+	case <-time.After(3 * time.Second):
+		t.Fatal("Test timed out")
+	}
 
 	if receivedCount != subscribers {
 		t.Errorf("Message received by %v subscribers, want %v", receivedCount, subscribers)
 	}
 }
 
-// TestMemoryStore_PubSub_Concurrent tests concurrent publish/subscribe operations
 func TestMemoryStore_PubSub_Concurrent(t *testing.T) {
 	ms := NewMemoryStore()
 	defer ms.Stop()
 
 	const publishers = 5
 	const subscribers = 5
-	const messagesPerPublisher = 100
+	const messagesPerPublisher = 20
 
 	var wg sync.WaitGroup
 	received := make(map[string]int)
 	var mu sync.Mutex
 
+	// Channel to signal when all messages have been published
+	allPublished := make(chan struct{})
+
 	// Create subscribers
+	var subWg sync.WaitGroup
 	for i := 0; i < subscribers; i++ {
 		ch, err := ms.Subscribe("test:*")
 		if err != nil {
 			t.Fatalf("Subscribe() error = %v", err)
 		}
 
-		wg.Add(1)
+		subWg.Add(1)
 		go func() {
-			defer wg.Done()
-			for msg := range ch {
-				mu.Lock()
-				received[string(msg)]++
-				mu.Unlock()
+			defer subWg.Done()
+			for {
+				select {
+				case msg, ok := <-ch:
+					if !ok {
+						return
+					}
+					mu.Lock()
+					received[string(msg)]++
+					mu.Unlock()
+				case <-allPublished:
+					// Give a short time to process any remaining messages
+					time.Sleep(100 * time.Millisecond)
+					return
+				}
 			}
 		}()
 	}
 
 	// Create publishers
+	wg.Add(publishers)
 	for i := 0; i < publishers; i++ {
-		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
 			for j := 0; j < messagesPerPublisher; j++ {
-				msg := []byte(time.Now().String())
-				err := ms.Publish("test:123", msg)
-				if err != nil {
+				msg := []byte(fmt.Sprintf("msg-%d-%d", id, j))
+				if err := ms.Publish("test:123", msg); err != nil {
 					t.Errorf("Publish() error = %v", err)
 				}
 				time.Sleep(time.Millisecond) // Small delay to prevent message flood
@@ -252,14 +279,38 @@ func TestMemoryStore_PubSub_Concurrent(t *testing.T) {
 		}(i)
 	}
 
-	// Wait for all operations to complete
+	// Wait for all publishers to finish
 	wg.Wait()
+	close(allPublished)
 
-	// Verify message counts
+	// Wait for subscribers to finish processing
+	done := make(chan struct{})
+	go func() {
+		subWg.Wait()
+		close(done)
+	}()
+
+	// Wait with timeout
+	select {
+	case <-done:
+		// Success
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeout waiting for subscribers to finish")
+	}
+
+	// Verify results
 	mu.Lock()
 	totalMessages := len(received)
+	messageCount := 0
+	for _, count := range received {
+		messageCount += count
+	}
 	mu.Unlock()
 
+	expectedTotal := publishers * messagesPerPublisher * subscribers
+	if messageCount != expectedTotal {
+		t.Errorf("Expected %d total message receipts, got %d", expectedTotal, messageCount)
+	}
 	if totalMessages == 0 {
 		t.Error("No messages were received")
 	}
