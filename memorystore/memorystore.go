@@ -1,3 +1,4 @@
+// memorystore/memorystore.go
 // Package memorystore provides a simple in-memory cache implementation with automatic cleanup
 // of expired items. It supports both raw byte storage and JSON serialization/deserialization
 // of structured data.
@@ -22,6 +23,7 @@ type item struct {
 type MemoryStore struct {
 	mu         sync.RWMutex       // Protects access to the store map
 	store      map[string]item    // Internal storage for cache items
+	ps         *pubSubManager     // PubSub manager for cache events
 	ctx        context.Context    // Context for controlling the cleanup worker
 	cancelFunc context.CancelFunc // Function to stop the cleanup worker
 	wg         sync.WaitGroup     // WaitGroup for cleanup goroutine synchronization
@@ -37,6 +39,7 @@ func NewMemoryStore() *MemoryStore {
 		ctx:        ctx,
 		cancelFunc: cancel,
 	}
+	ms.initPubSub()
 	ms.startCleanupWorker()
 	return ms
 }
@@ -59,6 +62,8 @@ func (m *MemoryStore) Stop() error {
 
 	m.cancelFunc()
 	m.cancelFunc = nil
+
+	m.cleanupPubSub()
 
 	// Wait for cleanup goroutine to finish
 	m.wg.Wait()

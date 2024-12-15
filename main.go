@@ -1,10 +1,14 @@
+// main.go
 // Package main provides a demonstration of the memorystore package functionality.
 // It shows various use cases including storing/retrieving data, handling expiration,
 // and proper error handling.
 package main
 
 import (
+	"encoding/json"
 	"log"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/BryceWayne/MemoryStore/memorystore"
@@ -119,6 +123,155 @@ func demonstrateStoreLifecycle() {
 	}
 }
 
+// demonstratePubSub shows the publish/subscribe functionality
+// with pattern matching and multiple subscribers.
+// demonstratePubSub shows the publish/subscribe functionality
+// with complex pattern matching and JSON message support.
+func demonstratePubSub(ms *memorystore.MemoryStore) {
+	log.Println("\n=== Demonstrating PubSub System ===")
+
+	var wg sync.WaitGroup
+
+	// 1. Complex Pattern Matching Examples
+	log.Println("Setting up pattern-based subscriptions...")
+	patterns := map[string]<-chan []byte{} // Store channels for cleanup
+
+	// Subscribe to various patterns
+	subscribePatterns := []string{
+		"users:*:status",       // Match all user statuses
+		"users:admin:*",        // Match all admin events
+		"orders:*.completed",   // Match all completed orders
+		"notifications:*:high", // Match high-priority notifications
+		"system:*.error",       // Match all system errors
+	}
+
+	for _, pattern := range subscribePatterns {
+		ch, err := ms.Subscribe(pattern)
+		if err != nil {
+			log.Printf("Failed to subscribe to %s: %v", pattern, err)
+			continue
+		}
+		patterns[pattern] = ch
+		log.Printf("Subscribed to pattern: %s", pattern)
+	}
+
+	// 2. JSON Message Integration
+	type UserStatus struct {
+		UserID   string            `json:"user_id"`
+		Status   string            `json:"status"`
+		LastSeen time.Time         `json:"last_seen"`
+		Metadata map[string]string `json:"metadata"`
+	}
+
+	type OrderEvent struct {
+		OrderID     string    `json:"order_id"`
+		Status      string    `json:"status"`
+		CompletedAt time.Time `json:"completed_at"`
+		Total       float64   `json:"total"`
+	}
+
+	// Set up listeners for each pattern
+	for pattern, ch := range patterns {
+		wg.Add(1)
+		go func(pattern string, ch <-chan []byte) {
+			defer wg.Done()
+			log.Printf("Listening on pattern: %s", pattern)
+
+			select {
+			case msg := <-ch:
+				// Try to decode as UserStatus if it's a user event
+				if strings.HasPrefix(pattern, "users:") {
+					var status UserStatus
+					if err := json.Unmarshal(msg, &status); err == nil {
+						log.Printf("[%s] User Status Update: %+v", pattern, status)
+					} else {
+						log.Printf("[%s] Raw message: %s", pattern, string(msg))
+					}
+				} else if strings.HasPrefix(pattern, "orders:") {
+					// Try to decode as OrderEvent
+					var order OrderEvent
+					if err := json.Unmarshal(msg, &order); err == nil {
+						log.Printf("[%s] Order Event: %+v", pattern, order)
+					} else {
+						log.Printf("[%s] Raw message: %s", pattern, string(msg))
+					}
+				} else {
+					log.Printf("[%s] Message received: %s", pattern, string(msg))
+				}
+			case <-time.After(2 * time.Second):
+				log.Printf("[%s] No message received", pattern)
+			}
+		}(pattern, ch)
+	}
+
+	// Publish various types of messages
+	time.Sleep(100 * time.Millisecond) // Ensure subscribers are ready
+	log.Println("\nPublishing messages...")
+
+	// Publish JSON user status
+	adminStatus := UserStatus{
+		UserID:   "admin123",
+		Status:   "online",
+		LastSeen: time.Now(),
+		Metadata: map[string]string{"location": "NYC", "device": "desktop"},
+	}
+	statusJSON, _ := json.Marshal(adminStatus)
+	ms.Publish("users:admin:status", statusJSON)
+
+	// Publish JSON order completion
+	order := OrderEvent{
+		OrderID:     "ORD-789",
+		Status:      "completed",
+		CompletedAt: time.Now(),
+		Total:       299.99,
+	}
+	orderJSON, _ := json.Marshal(order)
+	ms.Publish("orders:ORD-789.completed", orderJSON)
+
+	// Publish system error
+	ms.Publish("system:database.error", []byte("Connection timeout"))
+
+	// Publish high-priority notification
+	ms.Publish("notifications:user123:high", []byte("Account security alert"))
+
+	// Wait for message processing
+	wg.Wait()
+
+	log.Println("\nDemonstrating pattern matching scenarios...")
+	// Show which patterns match different keys
+	testCases := []struct {
+		channel  string
+		patterns []string
+	}{
+		{
+			channel:  "users:admin:login",
+			patterns: []string{"users:admin:*"},
+		},
+		{
+			channel:  "orders:xyz-789.completed",
+			patterns: []string{"orders:*.completed"},
+		},
+		{
+			channel:  "notifications:admin:high",
+			patterns: []string{"notifications:*:high"},
+		},
+	}
+
+	for _, tc := range testCases {
+		log.Printf("Channel '%s' matches patterns: %v", tc.channel, tc.patterns)
+	}
+
+	// Cleanup
+	log.Println("\nCleaning up subscriptions...")
+	for pattern := range patterns {
+		if err := ms.Unsubscribe(pattern); err != nil {
+			log.Printf("Error unsubscribing from %s: %v", pattern, err)
+		} else {
+			log.Printf("Unsubscribed from %s", pattern)
+		}
+	}
+}
+
 func main() {
 	// Create a new MemoryStore instance
 	ms := memorystore.NewMemoryStore()
@@ -134,6 +287,7 @@ func main() {
 	demonstrateBasicOperations(ms)
 	demonstrateExpiration(ms)
 	demonstrateNonExistentKeys(ms)
+	demonstratePubSub(ms) // Add this line
 	demonstrateStoreLifecycle()
 
 	log.Println("\nAll demonstrations completed successfully")

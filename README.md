@@ -14,6 +14,7 @@ MemoryStore is a high-performance, thread-safe, in-memory key-value store implem
 - 💪 High-performance using go-json
 - 🔒 Clean shutdown mechanism
 - 📝 Comprehensive documentation
+- 📡 Pattern-based Publish/Subscribe system
 
 ## Installation
 
@@ -86,6 +87,49 @@ func main() {
     }
 }
 ```
+
+### Working with PubSub
+
+MemoryStore includes a powerful publish/subscribe system for real-time communication:
+
+```go
+func main() {
+    store := memorystore.NewMemoryStore()
+    defer store.Stop()
+
+    // Subscribe to user updates
+    userEvents, err := store.Subscribe("user:*")
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // Listen for messages in a goroutine
+    go func() {
+        for msg := range userEvents {
+            log.Printf("Received update: %s", string(msg))
+        }
+    }()
+
+    // Publish updates
+    err = store.Publish("user:123", []byte("status:active"))
+    if err != nil {
+        log.Fatal(err)
+    }
+}
+```
+
+The PubSub system supports:
+- Pattern-based subscriptions (`user:*`, `order:*:status`)
+- Non-blocking message delivery
+- Automatic cleanup of disconnected subscribers
+- Thread-safe concurrent access
+- Integration with existing store operations
+
+Methods available:
+- `Subscribe(pattern string) (<-chan []byte, error)`: Subscribe to a pattern
+- `Publish(channel string, message []byte) error`: Publish a message
+- `Unsubscribe(pattern string) error`: Unsubscribe from a pattern
+- `SubscriberCount(pattern string) int`: Get number of subscribers
 
 ### Expiration and Cleanup
 
@@ -162,7 +206,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [ ] Add support for batch operations
 - [ ] Implement data persistence
 - [ ] Add metrics and monitoring
-- [ ] Support for pattern-based key deletion
 - [ ] Add compression options
 
 ## Support
