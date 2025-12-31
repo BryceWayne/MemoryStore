@@ -7,6 +7,7 @@ package memorystore
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -18,6 +19,14 @@ type item struct {
 	expiresAt time.Time // Time at which this item should be considered expired
 }
 
+// StoreMetrics holds statistics about the cache usage.
+type StoreMetrics struct {
+	Items     int   // Current number of items in the cache
+	Hits      int64 // Total number of cache hits
+	Misses    int64 // Total number of cache misses
+	Evictions int64 // Total number of items evicted (expired)
+}
+
 // MemoryStore implements an in-memory cache with automatic cleanup of expired items.
 // It is safe for concurrent use by multiple goroutines.
 type MemoryStore struct {
@@ -27,6 +36,11 @@ type MemoryStore struct {
 	ctx        context.Context    // Context for controlling the cleanup worker
 	cancelFunc context.CancelFunc // Function to stop the cleanup worker
 	wg         sync.WaitGroup     // WaitGroup for cleanup goroutine synchronization
+
+	// Metrics
+	hits      int64 // Atomic counter for cache hits
+	misses    int64 // Atomic counter for cache misses
+	evictions int64 // Atomic counter for evicted items
 }
 
 // NewMemoryStore creates and initializes a new MemoryStore instance.
@@ -117,6 +131,7 @@ func (m *MemoryStore) cleanupExpiredItems() {
 	for key, item := range m.store {
 		if time.Now().After(item.expiresAt) {
 			delete(m.store, key)
+			atomic.AddInt64(&m.evictions, 1)
 		}
 	}
 }
@@ -165,9 +180,11 @@ func (m *MemoryStore) Get(key string) ([]byte, bool) {
 
 	it, exists := m.store[key]
 	if !exists || time.Now().After(it.expiresAt) {
+		atomic.AddInt64(&m.misses, 1)
 		return nil, false
 	}
 
+	atomic.AddInt64(&m.hits, 1)
 	return it.value, true
 }
 
@@ -203,4 +220,58 @@ func (m *MemoryStore) Delete(key string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.store, key)
+}
+
+// SetMulti stores multiple key-value pairs in the cache.
+// This is more efficient than calling Set multiple times as it acquires the lock only once.
+// All items will have the same expiration duration.
+func (m *MemoryStore) SetMulti(items map[string][]byte, duration time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	expiresAt := time.Now().Add(duration)
+	for key, value := range items {
+		m.store[key] = item{
+			value:     value,
+			expiresAt: expiresAt,
+		}
+	}
+	return nil
+}
+
+// GetMulti retrieves multiple values from the cache.
+// It returns a map of found items. Keys that don't exist or are expired are omitted.
+func (m *MemoryStore) GetMulti(keys []string) map[string][]byte {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make(map[string][]byte)
+	now := time.Now()
+
+	for _, key := range keys {
+		it, exists := m.store[key]
+		if exists && !now.After(it.expiresAt) {
+			result[key] = it.value
+			atomic.AddInt64(&m.hits, 1)
+		} else {
+			atomic.AddInt64(&m.misses, 1)
+		}
+	}
+
+	return result
+}
+
+// GetMetrics returns the current statistics of the MemoryStore.
+// It returns a copy of the metrics to ensure thread safety.
+func (m *MemoryStore) GetMetrics() StoreMetrics {
+	m.mu.RLock()
+	itemCount := len(m.store)
+	m.mu.RUnlock()
+
+	return StoreMetrics{
+		Items:     itemCount,
+		Hits:      atomic.LoadInt64(&m.hits),
+		Misses:    atomic.LoadInt64(&m.misses),
+		Evictions: atomic.LoadInt64(&m.evictions),
+	}
 }
