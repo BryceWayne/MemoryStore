@@ -6,7 +6,10 @@ package memorystore
 
 import (
 	"context"
+	"log"
+	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -18,40 +21,57 @@ type item struct {
 	expiresAt time.Time // Time at which this item should be considered expired
 }
 
+// StoreMetrics holds statistics about the cache usage.
+type StoreMetrics struct {
+	Items     int   // Current number of items in the cache
+	Hits      int64 // Total number of cache hits
+	Misses    int64 // Total number of cache misses
+	Evictions int64 // Total number of items evicted (expired)
+}
+
 // MemoryStore implements an in-memory cache with automatic cleanup of expired items.
 // It is safe for concurrent use by multiple goroutines.
 type MemoryStore struct {
 	mu         sync.RWMutex       // Protects access to the store map
 	store      map[string]item    // Internal storage for cache items
-	ps         *pubSubManager     // PubSub manager for cache events
+	ps         PubSubClient       // PubSub client for cache events
 	ctx        context.Context    // Context for controlling the cleanup worker
 	cancelFunc context.CancelFunc // Function to stop the cleanup worker
 	wg         sync.WaitGroup     // WaitGroup for cleanup goroutine synchronization
+
+	// Metrics
+	hits      int64 // Atomic counter for cache hits
+	misses    int64 // Atomic counter for cache misses
+	evictions int64 // Atomic counter for evicted items
 }
 
 // NewMemoryStore creates and initializes a new MemoryStore instance.
-// It starts a background worker that periodically cleans up expired items.
-// The returned MemoryStore is ready for use.
+// It checks for GOOGLE_CLOUD_PROJECT environment variable to decide whether to use GCP PubSub.
+// Use NewMemoryStoreWithConfig for more control.
 func NewMemoryStore() *MemoryStore {
+	config := Config{}
+	if projectID := os.Getenv("GOOGLE_CLOUD_PROJECT"); projectID != "" {
+		config.GCPProjectID = projectID
+	}
+	return NewMemoryStoreWithConfig(config)
+}
+
+// NewMemoryStoreWithConfig creates a new MemoryStore with the provided configuration.
+func NewMemoryStoreWithConfig(config Config) *MemoryStore {
 	ctx, cancel := context.WithCancel(context.Background())
 	ms := &MemoryStore{
 		store:      make(map[string]item),
 		ctx:        ctx,
 		cancelFunc: cancel,
 	}
-	ms.initPubSub()
+
+	ms.initPubSub(config)
 	ms.startCleanupWorker()
 	return ms
 }
 
 // Stop gracefully shuts down the MemoryStore by stopping the cleanup goroutine
 // and releasing associated resources. After calling Stop, the store cannot be used.
-// Multiple calls to Stop will not cause a panic and return nil.
-//
-// Example:
-//
-//	store := NewMemoryStore()
-//	defer store.Stop()
 func (m *MemoryStore) Stop() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -75,14 +95,6 @@ func (m *MemoryStore) Stop() error {
 }
 
 // IsStopped returns true if the MemoryStore has been stopped and can no longer be used.
-// This method is safe for concurrent use.
-//
-// Example:
-//
-//	if store.IsStopped() {
-//	    log.Println("Store is no longer available")
-//	    return
-//	}
 func (m *MemoryStore) IsStopped() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -90,7 +102,7 @@ func (m *MemoryStore) IsStopped() bool {
 }
 
 // startCleanupWorker initiates a background goroutine that periodically
-// removes expired items from the cache. The cleanup interval is set to 1 minute.
+// removes expired items from the cache.
 func (m *MemoryStore) startCleanupWorker() {
 	m.wg.Add(1)
 	go func() {
@@ -110,20 +122,18 @@ func (m *MemoryStore) startCleanupWorker() {
 }
 
 // cleanupExpiredItems removes all expired items from the cache.
-// This method acquires a write lock on the store while performing the cleanup.
 func (m *MemoryStore) cleanupExpiredItems() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for key, item := range m.store {
 		if time.Now().After(item.expiresAt) {
 			delete(m.store, key)
+			atomic.AddInt64(&m.evictions, 1)
 		}
 	}
 }
 
 // Set stores a raw byte slice in the cache with the specified key and duration.
-// The item will automatically expire after the specified duration.
-// If an error occurs, it will be returned to the caller.
 func (m *MemoryStore) Set(key string, value []byte, duration time.Duration) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -137,17 +147,6 @@ func (m *MemoryStore) Set(key string, value []byte, duration time.Duration) erro
 }
 
 // SetJSON stores a JSON-serializable value in the cache.
-// The value is serialized to JSON before storage.
-// Returns an error if JSON marshaling fails.
-//
-// Example:
-//
-//	type User struct {
-//	    Name string
-//	    Age  int
-//	}
-//	user := User{Name: "John", Age: 30}
-//	err := cache.SetJSON("user:123", user, 1*time.Hour)
 func (m *MemoryStore) SetJSON(key string, value interface{}, duration time.Duration) error {
 	data, err := json.Marshal(value)
 	if err != nil {
@@ -157,32 +156,21 @@ func (m *MemoryStore) SetJSON(key string, value interface{}, duration time.Durat
 }
 
 // Get retrieves a value from the cache.
-// Returns the value and a boolean indicating whether the key was found.
-// If the item has expired, returns (nil, false).
 func (m *MemoryStore) Get(key string) ([]byte, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	it, exists := m.store[key]
 	if !exists || time.Now().After(it.expiresAt) {
+		atomic.AddInt64(&m.misses, 1)
 		return nil, false
 	}
 
+	atomic.AddInt64(&m.hits, 1)
 	return it.value, true
 }
 
-// GetJSON retrieves and deserializes a JSON value from the cache into the provided interface.
-// Returns a boolean indicating if the key was found and any error that occurred during deserialization.
-//
-// Example:
-//
-//	var user User
-//	exists, err := cache.GetJSON("user:123", &user)
-//	if err != nil {
-//	    // Handle error
-//	} else if exists {
-//	    fmt.Printf("Found user: %+v\n", user)
-//	}
+// GetJSON retrieves and deserializes a JSON value from the cache.
 func (m *MemoryStore) GetJSON(key string, dest interface{}) (bool, error) {
 	data, exists := m.Get(key)
 	if !exists {
@@ -198,9 +186,125 @@ func (m *MemoryStore) GetJSON(key string, dest interface{}) (bool, error) {
 }
 
 // Delete removes an item from the cache.
-// If the key doesn't exist, the operation is a no-op.
 func (m *MemoryStore) Delete(key string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.store, key)
+}
+
+// SetMulti stores multiple key-value pairs in the cache.
+func (m *MemoryStore) SetMulti(items map[string][]byte, duration time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	expiresAt := time.Now().Add(duration)
+	for key, value := range items {
+		m.store[key] = item{
+			value:     value,
+			expiresAt: expiresAt,
+		}
+	}
+	return nil
+}
+
+// GetMulti retrieves multiple values from the cache.
+func (m *MemoryStore) GetMulti(keys []string) map[string][]byte {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make(map[string][]byte)
+	now := time.Now()
+
+	for _, key := range keys {
+		it, exists := m.store[key]
+		if exists && !now.After(it.expiresAt) {
+			result[key] = it.value
+			atomic.AddInt64(&m.hits, 1)
+		} else {
+			atomic.AddInt64(&m.misses, 1)
+		}
+	}
+
+	return result
+}
+
+// GetMetrics returns the current statistics of the MemoryStore.
+func (m *MemoryStore) GetMetrics() StoreMetrics {
+	m.mu.RLock()
+	itemCount := len(m.store)
+	m.mu.RUnlock()
+
+	return StoreMetrics{
+		Items:     itemCount,
+		Hits:      atomic.LoadInt64(&m.hits),
+		Misses:    atomic.LoadInt64(&m.misses),
+		Evictions: atomic.LoadInt64(&m.evictions),
+	}
+}
+
+// Subscribe subscribes to a topic.
+func (m *MemoryStore) Subscribe(topic string) (<-chan []byte, error) {
+	if m.IsStopped() {
+		return nil, ErrStoreStopped
+	}
+	return m.ps.Subscribe(topic)
+}
+
+// Publish publishes a message to a topic.
+func (m *MemoryStore) Publish(topic string, message []byte) error {
+	if m.IsStopped() {
+		return ErrStoreStopped
+	}
+	return m.ps.Publish(topic, message)
+}
+
+// Unsubscribe unsubscribes from a topic.
+func (m *MemoryStore) Unsubscribe(topic string) error {
+	if m.IsStopped() {
+		return ErrStoreStopped
+	}
+	return m.ps.Unsubscribe(topic)
+}
+
+// SubscriberCount returns the number of subscribers for a pattern.
+// Note: This is not supported by the common interface and will return 0 or error in future.
+// For now, it only works if the underlying implementation is In-Memory.
+func (m *MemoryStore) SubscriberCount(pattern string) int {
+	// Not part of the interface.
+	// If we need this, we should add it to the interface or check type.
+	if ps, ok := m.ps.(*InMemoryPubSub); ok {
+		ps.mu.RLock()
+		defer ps.mu.RUnlock()
+		count := 0
+		for p, subs := range ps.subscriptions {
+			if p == pattern {
+				count += len(subs)
+			}
+		}
+		return count
+	}
+	return 0
+}
+
+// initPubSub initializes the PubSub system.
+func (m *MemoryStore) initPubSub(config Config) {
+	if config.GCPProjectID != "" {
+		ps, err := NewGCPPubSub(context.Background(), config.GCPProjectID)
+		if err == nil {
+			m.ps = ps
+			log.Printf("Initialized GCP PubSub with project %s", config.GCPProjectID)
+			return
+		}
+		log.Printf("Failed to initialize GCP PubSub: %v. Falling back to In-Memory.", err)
+	}
+
+	m.ps = newInMemoryPubSub()
+	log.Println("Initialized In-Memory PubSub")
+}
+
+// cleanupPubSub cleans up the PubSub system.
+func (m *MemoryStore) cleanupPubSub() {
+	if m.ps != nil {
+		m.ps.Close()
+	}
 }
