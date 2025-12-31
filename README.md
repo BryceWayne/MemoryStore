@@ -55,9 +55,48 @@ func main() {
 }
 ```
 
-## PubSub Usage (Canonical Example)
+## PubSub Usage
 
 MemoryStore supports an agnostic PubSub interface. By default, it uses an in-memory implementation. To use Google Cloud PubSub, simply provide your Project ID configuration.
+
+### Using In-Memory PubSub (Default)
+
+```go
+package main
+
+import (
+    "log"
+    "time"
+    "github.com/BryceWayne/MemoryStore/memorystore"
+)
+
+func main() {
+    store := memorystore.NewMemoryStore()
+    defer store.Stop()
+
+    // Subscribe to a topic
+    msgs, err := store.Subscribe("user-updates")
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // Listen in background
+    go func() {
+        for msg := range msgs {
+            log.Printf("Received: %s", string(msg))
+        }
+    }()
+
+    // Publish to the topic
+    err = store.Publish("user-updates", []byte("User 123 logged in"))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // Give time for message delivery
+    time.Sleep(1 * time.Second)
+}
+```
 
 ### Using Google Cloud PubSub
 
@@ -170,6 +209,35 @@ metrics := store.GetMetrics()
 log.Printf("Hits: %d, Misses: %d, Items: %d", metrics.Hits, metrics.Misses, metrics.Items)
 ```
 
+### Expiration and Cleanup
+
+Keys automatically expire after their specified duration:
+
+```go
+// Set a value that expires in 5 seconds
+store.Set("temp", []byte("temporary value"), 5*time.Second)
+
+// The background cleanup routine will automatically remove expired items
+// You can also manually check if an item exists
+time.Sleep(6 * time.Second)
+if _, exists := store.Get("temp"); !exists {
+    log.Println("Key has expired")
+}
+```
+
+### Proper Shutdown
+
+Always ensure proper cleanup by calling `Stop()`:
+
+```go
+store := memorystore.NewMemoryStore()
+defer func() {
+    if err := store.Stop(); err != nil {
+        log.Printf("Error stopping store: %v", err)
+    }
+}()
+```
+
 ## Performance Considerations
 
 - Uses `github.com/goccy/go-json` for faster JSON operations
@@ -194,8 +262,27 @@ make bench
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
+3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
+4. Push to the branch (`git push origin feature/AmazingFeature`)
+5. Open a Pull Request
 
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Acknowledgments
+
+- Thanks to the Go team for the amazing standard library
+- [go-json](https://github.com/goccy/go-json) for high-performance JSON operations
+
+## Support
+
+If you have any questions or need help integrating MemoryStore, please:
+
+1. Check the [documentation](https://godoc.org/github.com/BryceWayne/MemoryStore)
+2. Open an issue with a detailed description
+3. Reach out through the discussions tab
