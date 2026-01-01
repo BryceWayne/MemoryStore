@@ -1,6 +1,6 @@
 # 🚀 MemoryStore
 
-MemoryStore is a high-performance, thread-safe, in-memory key-value store implemented in Go. It features automatic key expiration, JSON serialization support, and concurrent access safety.
+MemoryStore is a high-performance, thread-safe, in-memory key-value store implemented in Go. It features automatic key expiration, JSON serialization support, batch operations, metrics, and an agnostic Publish/Subscribe system (supporting In-Memory and Google Cloud PubSub).
 
 [![Go Report Card](https://goreportcard.com/badge/github.com/BryceWayne/MemoryStore)](https://goreportcard.com/report/github.com/BryceWayne/MemoryStore)
 [![GoDoc](https://godoc.org/github.com/BryceWayne/MemoryStore?status.svg)](https://godoc.org/github.com/BryceWayne/MemoryStore)
@@ -12,9 +12,11 @@ MemoryStore is a high-performance, thread-safe, in-memory key-value store implem
 - 🧹 Background cleanup of expired keys
 - 📦 Support for both raw bytes and JSON data
 - 💪 High-performance using go-json
+- 🚀 Batch operations (`SetMulti`, `GetMulti`)
+- 📊 Built-in Metrics and Monitoring
+- 📡 Agnostic Publish/Subscribe system (In-Memory & GCP PubSub)
 - 🔒 Clean shutdown mechanism
 - 📝 Comprehensive documentation
-- 📡 Pattern-based Publish/Subscribe system
 
 ## Installation
 
@@ -36,7 +38,7 @@ import (
 )
 
 func main() {
-    // Create a new store instance
+    // Create a new store instance (defaults to In-Memory PubSub)
     store := memorystore.NewMemoryStore()
     defer store.Stop()
 
@@ -51,6 +53,102 @@ func main() {
         log.Printf("Value: %s", string(value))
     }
 }
+```
+
+## PubSub Usage
+
+MemoryStore supports an agnostic PubSub interface. By default, it uses an in-memory implementation. To use Google Cloud PubSub, simply provide your Project ID configuration.
+
+### Using In-Memory PubSub (Default)
+
+```go
+package main
+
+import (
+    "log"
+    "time"
+    "github.com/BryceWayne/MemoryStore/memorystore"
+)
+
+func main() {
+    store := memorystore.NewMemoryStore()
+    defer store.Stop()
+
+    // Subscribe to a topic
+    msgs, err := store.Subscribe("user-updates")
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // Listen in background
+    go func() {
+        for msg := range msgs {
+            log.Printf("Received: %s", string(msg))
+        }
+    }()
+
+    // Publish to the topic
+    err = store.Publish("user-updates", []byte("User 123 logged in"))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // Give time for message delivery
+    time.Sleep(1 * time.Second)
+}
+```
+
+### Using Google Cloud PubSub
+
+```go
+package main
+
+import (
+    "log"
+    "time"
+    "github.com/BryceWayne/MemoryStore/memorystore"
+)
+
+func main() {
+    // Configure with GCP Project ID
+    config := memorystore.Config{
+        GCPProjectID: "my-gcp-project-id",
+    }
+    store := memorystore.NewMemoryStoreWithConfig(config)
+    defer store.Stop()
+
+    // Subscribe to a topic
+    // Note: GCP PubSub creates a subscription for this topic
+    msgs, err := store.Subscribe("user-updates")
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // Listen in background
+    go func() {
+        for msg := range msgs {
+            log.Printf("Received: %s", string(msg))
+        }
+    }()
+
+    // Publish to the topic
+    err = store.Publish("user-updates", []byte("User 123 logged in"))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // Give time for message delivery
+    time.Sleep(1 * time.Second)
+}
+```
+
+Or simply set `GOOGLE_CLOUD_PROJECT` environment variable:
+
+```bash
+export GOOGLE_CLOUD_PROJECT=my-project-id
+```
+```go
+store := memorystore.NewMemoryStore() // Automatically picks up GCP PubSub
 ```
 
 ## Advanced Usage
@@ -88,48 +186,28 @@ func main() {
 }
 ```
 
-### Working with PubSub
+### Batch Operations
 
-MemoryStore includes a powerful publish/subscribe system for real-time communication:
+Efficiently set or get multiple items at once:
 
 ```go
-func main() {
-    store := memorystore.NewMemoryStore()
-    defer store.Stop()
-
-    // Subscribe to user updates
-    userEvents, err := store.Subscribe("user:*")
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    // Listen for messages in a goroutine
-    go func() {
-        for msg := range userEvents {
-            log.Printf("Received update: %s", string(msg))
-        }
-    }()
-
-    // Publish updates
-    err = store.Publish("user:123", []byte("status:active"))
-    if err != nil {
-        log.Fatal(err)
-    }
+items := map[string][]byte{
+    "key1": []byte("val1"),
+    "key2": []byte("val2"),
 }
+store.SetMulti(items, time.Minute)
+
+results := store.GetMulti([]string{"key1", "key2"})
 ```
 
-The PubSub system supports:
-- Pattern-based subscriptions (`user:*`, `order:*:status`)
-- Non-blocking message delivery
-- Automatic cleanup of disconnected subscribers
-- Thread-safe concurrent access
-- Integration with existing store operations
+### Metrics
 
-Methods available:
-- `Subscribe(pattern string) (<-chan []byte, error)`: Subscribe to a pattern
-- `Publish(channel string, message []byte) error`: Publish a message
-- `Unsubscribe(pattern string) error`: Unsubscribe from a pattern
-- `SubscriberCount(pattern string) int`: Get number of subscribers
+Monitor cache performance:
+
+```go
+metrics := store.GetMetrics()
+log.Printf("Hits: %d, Misses: %d, Items: %d", metrics.Hits, metrics.Misses, metrics.Items)
+```
 
 ### Expiration and Cleanup
 
@@ -200,13 +278,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - Thanks to the Go team for the amazing standard library
 - [go-json](https://github.com/goccy/go-json) for high-performance JSON operations
-
-## Todo
-
-- [ ] Add support for batch operations
-- [ ] Implement data persistence
-- [ ] Add metrics and monitoring
-- [ ] Add compression options
 
 ## Support
 
