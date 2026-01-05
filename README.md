@@ -238,6 +238,68 @@ defer func() {
 }()
 ```
 
+## Architecture
+
+Here's an overview of how MemoryStore is architected:
+
+```mermaid
+graph TD
+    subgraph Client Layer
+        User[User Application]
+    end
+
+    subgraph MemoryStore System
+        API[MemoryStore API]
+
+        subgraph "Storage Engine"
+            Shards[Sharded Storage Map]
+            Metrics[Metrics Collector]
+        end
+
+        subgraph "Background Services"
+            Cleaner[Cleanup Routine]
+        end
+
+        subgraph "Pub/Sub System"
+            PS_Interface[PubSub Interface]
+            PS_Mem[In-Memory Broker]
+            PS_GCP[Google Cloud PubSub]
+        end
+    end
+
+    User -->|Set/Get| API
+    User -->|Subscribe| API
+
+    API -->|Read/Write| Shards
+    API -->|Record| Metrics
+    API -->|Publish| PS_Interface
+
+    Cleaner -->|Periodically Scan| Shards
+    Cleaner -->|Remove Expired| Shards
+
+    PS_Interface -->|Default| PS_Mem
+    PS_Interface -->|Configured| PS_GCP
+```
+
+### PubSub Data Flow
+
+```mermaid
+sequenceDiagram
+    participant P as Publisher
+    participant MS as MemoryStore
+    participant S as Subscriber
+
+    S->>MS: Subscribe("topic-A")
+    activate MS
+    MS-->>S: Returns Channel
+    deactivate MS
+
+    P->>MS: Publish("topic-A", "payload")
+    activate MS
+    MS->>S: Sends "payload" to Channel
+    deactivate MS
+```
+
 ## Performance Considerations
 
 - Uses `github.com/goccy/go-json` for faster JSON operations
@@ -253,11 +315,20 @@ Use the provided Makefile:
 # Build the project
 make build
 
-# Run tests
+# Run tests (with race detection)
 make test
 
 # Run benchmarks
 make bench
+
+# Run linter
+make lint
+
+# Format code
+make fmt
+
+# Show all targets
+make help
 ```
 
 ## Contributing
