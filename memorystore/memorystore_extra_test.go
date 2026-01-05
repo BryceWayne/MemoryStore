@@ -44,7 +44,6 @@ func TestMemoryStore_InitPubSub_GCP(t *testing.T) {
 
 	// Verify it is indeed InMemoryPubSub by checking type or behavior
 	// internal field ms.ps is private, but we can check behavior
-	// or use reflection/unsafe if really needed, but generally if it works it works.
 	// We can check if SubscriberCount works, as it only works for InMemory
 
 	// Create a subscription
