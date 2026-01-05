@@ -16,7 +16,9 @@ func TestMemoryStore_SubscriberCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Subscribe 1 failed: %v", err)
 	}
-	defer ms.Unsubscribe(topic)
+	defer func() {
+		_ = ms.Unsubscribe(topic)
+	}()
 
 	if count := ms.SubscriberCount(topic); count != 1 {
 		t.Errorf("SubscriberCount should be 1, got %d", count)
@@ -46,8 +48,10 @@ func TestMemoryStore_SubscriberCount(t *testing.T) {
 
 	// Consume channels to avoid blockage/leaks in test
 	go func() {
-		for range ch1 {}
-		for range ch2 {}
+		for range ch1 {
+		}
+		for range ch2 {
+		}
 	}()
 }
 
