@@ -8,6 +8,7 @@ on:
     branches: [ "root" ]
   pull_request:
     branches: [ "root" ]
+  workflow_dispatch:
 
 jobs:
 
@@ -19,10 +20,43 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v4
       with:
-        go-version: '1.20'
+        go-version: '1.24'
+        cache: true
+
+    - name: Get dependencies
+      run: |
+        go mod download
+        go mod verify
+
+    - name: Verify formatting
+      run: |
+        gofmt -l . > gofmt_diff.txt
+        if [ -s gofmt_diff.txt ]; then
+          echo "Run 'go fmt ./...' to fix formatting"
+          cat gofmt_diff.txt
+          exit 1
+        fi
+
+    - name: Vet
+      run: go vet ./...
+
+    - name: Install golangci-lint
+      run: |
+        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.64.6
+
+    - name: Run golangci-lint
+      run: golangci-lint run ./...
 
     - name: Build
       run: go build -v ./...
 
-    - name: Test
-      run: go test -v ./...
+    - name: Test with Race Detector and Coverage
+      run: go test -race -coverprofile=coverage.out -covermode=atomic -v ./...
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }} # optional, but required for private repos
+        file: ./coverage.out
+        flags: unittests
+        name: codecov-umbrella

@@ -7,7 +7,9 @@ import (
 
 func TestBatchOperations(t *testing.T) {
 	ms := NewMemoryStore()
-	defer ms.Stop()
+	defer func() {
+		_ = ms.Stop()
+	}()
 
 	// Test SetMulti
 	items := map[string][]byte{

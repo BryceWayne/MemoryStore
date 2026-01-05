@@ -90,14 +90,20 @@ func demonstratePubSub(ms *memorystore.MemoryStore) {
 
 	// Publish
 	time.Sleep(500 * time.Millisecond) // Wait for subscriptions
-	ms.Publish("updates", []byte("System update available"))
-	ms.Publish("alerts", []byte("High CPU usage"))
+	if err := ms.Publish("updates", []byte("System update available")); err != nil {
+		log.Printf("Error publishing to updates: %v", err)
+	}
+	if err := ms.Publish("alerts", []byte("High CPU usage")); err != nil {
+		log.Printf("Error publishing to alerts: %v", err)
+	}
 
 	wg.Wait()
 
 	// Unsubscribe
 	for _, topic := range topics {
-		ms.Unsubscribe(topic)
+		if err := ms.Unsubscribe(topic); err != nil {
+			log.Printf("Error unsubscribing from %s: %v", topic, err)
+		}
 	}
 }
 
@@ -108,7 +114,11 @@ func main() {
 	}
 
 	ms := memorystore.NewMemoryStore()
-	defer ms.Stop()
+	defer func() {
+		if err := ms.Stop(); err != nil {
+			log.Printf("Error stopping store: %v", err)
+		}
+	}()
 
 	demonstrateBasicOperations(ms)
 	demonstratePubSub(ms)

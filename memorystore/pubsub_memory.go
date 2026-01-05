@@ -14,10 +14,10 @@ const (
 
 // subscription represents an individual subscriber
 type subscription struct {
-	topic   string          // The topic this subscription matches
-	ch      chan []byte     // Channel for sending messages to the subscriber
-	ctx     context.Context // Context for managing subscription lifetime
-	cancel  func()          // Function to cancel the subscription context
+	topic  string          // The topic this subscription matches
+	ch     chan []byte     // Channel for sending messages to the subscriber
+	ctx    context.Context // Context for managing subscription lifetime
+	cancel func()          // Function to cancel the subscription context
 }
 
 // InMemoryPubSub handles all publish/subscribe operations in memory
@@ -53,10 +53,10 @@ func (ps *InMemoryPubSub) Subscribe(topic string) (<-chan []byte, error) {
 	ch := make(chan []byte, defaultChannelBuffer)
 
 	sub := &subscription{
-		topic:   topic,
-		ch:      ch,
-		ctx:     ctx,
-		cancel:  cancel,
+		topic:  topic,
+		ch:     ch,
+		ctx:    ctx,
+		cancel: cancel,
 	}
 
 	// Add subscription to manager
