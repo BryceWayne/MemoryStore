@@ -54,7 +54,9 @@ func TestMemoryStore_SetGet(t *testing.T) {
     for _, tt := range tests {
         t.Run(tt.name, func(t *testing.T) {
             ms := NewMemoryStore()
-            defer ms.Stop()
+            defer func() {
+                _ = ms.Stop()
+            }()
 
             err := ms.Set(tt.key, tt.value, tt.expiration)
             if (err != nil) != tt.wantErr {
@@ -112,7 +114,9 @@ func TestMemoryStore_SetGetJSON(t *testing.T) {
     for _, tt := range tests {
         t.Run(tt.name, func(t *testing.T) {
             ms := NewMemoryStore()
-            defer ms.Stop()
+            defer func() {
+                _ = ms.Stop()
+            }()
 
             err := ms.SetJSON(tt.key, tt.value, tt.expiration)
             if (err != nil) != tt.wantErr {
@@ -140,7 +144,9 @@ func TestMemoryStore_SetGetJSON(t *testing.T) {
 // TestMemoryStore_Delete tests the Delete operation
 func TestMemoryStore_Delete(t *testing.T) {
     ms := NewMemoryStore()
-    defer ms.Stop()
+    defer func() {
+        _ = ms.Stop()
+    }()
 
     // Set up test data
     testData := map[string][]byte{
@@ -166,7 +172,9 @@ func TestMemoryStore_Delete(t *testing.T) {
 // TestMemoryStore_Expiration tests expiration functionality
 func TestMemoryStore_Expiration(t *testing.T) {
     ms := NewMemoryStore()
-    defer ms.Stop()
+    defer func() {
+        _ = ms.Stop()
+    }()
 
     key := "expiring"
     value := []byte("value")
@@ -218,7 +226,9 @@ func TestMemoryStore_Stop(t *testing.T) {
 // TestMemoryStore_Concurrent tests concurrent access
 func TestMemoryStore_Concurrent(t *testing.T) {
     ms := NewMemoryStore()
-    defer ms.Stop()
+    defer func() {
+        _ = ms.Stop()
+    }()
 
     const goroutines = 10
     const operationsPerGoroutine = 100
@@ -256,7 +266,9 @@ func TestMemoryStore_Concurrent(t *testing.T) {
 // BenchmarkMemoryStore_SetGet benchmarks Set and Get operations
 func BenchmarkMemoryStore_SetGet(b *testing.B) {
     ms := NewMemoryStore()
-    defer ms.Stop()
+    defer func() {
+        _ = ms.Stop()
+    }()
 
     b.ResetTimer()
     for i := 0; i < b.N; i++ {
@@ -375,7 +387,9 @@ func TestMemoryStore_SetJSON(t *testing.T) {
     for _, tt := range tests {
         t.Run(tt.name, func(t *testing.T) {
             ms := NewMemoryStore()
-            defer ms.Stop()
+            defer func() {
+                _ = ms.Stop()
+            }()
 
             err := ms.SetJSON(tt.key, tt.value, tt.expiration)
             if (err != nil) != tt.wantErr {
@@ -503,7 +517,9 @@ func TestMemoryStore_GetJSON(t *testing.T) {
     for _, tt := range tests {
         t.Run(tt.name, func(t *testing.T) {
             ms := NewMemoryStore()
-            defer ms.Stop()
+            defer func() {
+                _ = ms.Stop()
+            }()
 
             // Store the test value if it's not a non-existent key test
             if tt.storeValue != nil {

@@ -63,7 +63,9 @@ func TestMemoryStore_Subscribe(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ms := NewMemoryStore()
-			defer ms.Stop()
+			defer func() {
+				_ = ms.Stop()
+			}()
 
 			// Create subscription
 			ch, err := ms.Subscribe(tt.pattern)
@@ -116,7 +118,9 @@ func TestMemoryStore_Subscribe(t *testing.T) {
 // TestMemoryStore_Unsubscribe tests unsubscription functionality
 func TestMemoryStore_Unsubscribe(t *testing.T) {
 	ms := NewMemoryStore()
-	defer ms.Stop()
+	defer func() {
+		_ = ms.Stop()
+	}()
 
 	pattern := "test:*"
 	ch, err := ms.Subscribe(pattern)
@@ -149,7 +153,9 @@ func TestMemoryStore_Unsubscribe(t *testing.T) {
 // TestMemoryStore_MultipleSubscribers tests multiple subscribers to the same pattern
 func TestMemoryStore_MultipleSubscribers(t *testing.T) {
 	ms := NewMemoryStore()
-	defer ms.Stop()
+	defer func() {
+		_ = ms.Stop()
+	}()
 
 	pattern := "test:*"
 	subscribers := 5
@@ -222,7 +228,9 @@ func TestMemoryStore_MultipleSubscribers(t *testing.T) {
 
 func TestMemoryStore_PubSub_Concurrent(t *testing.T) {
 	ms := NewMemoryStore()
-	defer ms.Stop()
+	defer func() {
+		_ = ms.Stop()
+	}()
 
 	const publishers = 5
 	const subscribers = 5
@@ -319,7 +327,9 @@ func TestMemoryStore_PubSub_Concurrent(t *testing.T) {
 // BenchmarkMemoryStore_PubSub benchmarks publish/subscribe operations
 func BenchmarkMemoryStore_PubSub(b *testing.B) {
 	ms := NewMemoryStore()
-	defer ms.Stop()
+	defer func() {
+		_ = ms.Stop()
+	}()
 
 	ch, err := ms.Subscribe("bench:*")
 	if err != nil {

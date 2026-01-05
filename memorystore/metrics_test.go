@@ -7,7 +7,9 @@ import (
 
 func TestMetrics(t *testing.T) {
 	ms := NewMemoryStore()
-	defer ms.Stop()
+	defer func() {
+		_ = ms.Stop()
+	}()
 
 	// Initial metrics should be zero
 	metrics := ms.GetMetrics()
@@ -16,7 +18,7 @@ func TestMetrics(t *testing.T) {
 	}
 
 	// Test Hits
-	ms.Set("key1", []byte("value1"), time.Minute)
+	_ = ms.Set("key1", []byte("value1"), time.Minute)
 	ms.Get("key1")
 	metrics = ms.GetMetrics()
 	if metrics.Hits != 1 {
@@ -31,14 +33,14 @@ func TestMetrics(t *testing.T) {
 	}
 
 	// Test Items
-	ms.Set("key2", []byte("value2"), time.Minute)
+	_ = ms.Set("key2", []byte("value2"), time.Minute)
 	metrics = ms.GetMetrics()
 	if metrics.Items != 2 {
 		t.Errorf("Expected 2 items, got %d", metrics.Items)
 	}
 
 	// Test Evictions
-	ms.Set("expired", []byte("expired"), 1*time.Millisecond)
+	_ = ms.Set("expired", []byte("expired"), 1*time.Millisecond)
 	time.Sleep(100 * time.Millisecond) // Wait for expiration
 
 	// Trigger cleanup

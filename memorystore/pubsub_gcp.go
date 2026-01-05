@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub" //nolint:staticcheck
 	"github.com/google/uuid"
 	"google.golang.org/api/option"
 )
@@ -99,8 +99,9 @@ func (g *GCPPubSub) Subscribe(topicName string) (<-chan []byte, error) {
 			}
 		})
 		if err != nil && err != context.Canceled {
-			// Log error?
-			// fmt.Printf("Receive error: %v\n", err)
+			// In a real application, we might want to log this error or handle it more gracefully.
+			// For now, we'll just ignore it as per the existing design.
+			_ = err
 		}
 	}()
 
@@ -151,6 +152,7 @@ func (g *GCPPubSub) Unsubscribe(topicName string) error {
 	// Delete subscription from GCP to clean up
 	if err := sub.sub.Delete(context.Background()); err != nil {
 		// Log error but continue
+		_ = err
 	}
 
 	delete(g.subscriptions, topicName)
@@ -166,7 +168,7 @@ func (g *GCPPubSub) Close() error {
 		sub.cancel()
 		sub.wg.Wait()
 		// Best effort delete
-		sub.sub.Delete(context.Background())
+		_ = sub.sub.Delete(context.Background())
 	}
 	g.subscriptions = nil
 
