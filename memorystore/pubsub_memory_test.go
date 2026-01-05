@@ -42,6 +42,11 @@ func TestInMemoryPubSub_Closed(t *testing.T) {
 		t.Fatalf("Close failed: %v", err)
 	}
 
+	// Test Double Close
+	if err := ps.Close(); err != nil {
+		t.Errorf("Second Close should return nil, got %v", err)
+	}
+
 	// Test operations after Close
 	if _, err := ps.Subscribe("topic"); err != ErrStoreStopped {
 		t.Errorf("Subscribe after Close should return ErrStoreStopped, got %v", err)
@@ -108,6 +113,39 @@ func TestInMemoryPubSub_RemoveSubscription(t *testing.T) {
 		}
 	default:
 	}
+}
+
+func TestInMemoryPubSub_RemoveSubscription_AfterClose(t *testing.T) {
+	ps := newInMemoryPubSub()
+	topic := "topic"
+	_, err := ps.Subscribe(topic)
+	if err != nil {
+		t.Fatalf("Subscribe failed: %v", err)
+	}
+
+	// Close store
+	if err := ps.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	// Try to remove subscription (simulate race or delayed cleanup)
+	// We need a subscription object to pass. But removeSubscription takes *subscription.
+	// Since removeSubscription is internal, and we are in the same package (memorystore), we can construct one or access it if we had it.
+	// But we can't easily get the subscription object created inside Subscribe.
+	// However, we can use reflection or just manually call removeSubscription with a dummy if we want to test the check.
+
+	// Since we are in `memorystore` package, we can create a dummy subscription.
+	dummySub := &subscription{topic: topic}
+	ps.removeSubscription(topic, dummySub) // Should return immediately because ps.closed is true
+}
+
+func TestInMemoryPubSub_RemoveSubscription_TopicNotFound(t *testing.T) {
+	ps := newInMemoryPubSub()
+	defer ps.Close()
+
+	// Try to remove subscription for non-existent topic
+	dummySub := &subscription{topic: "non-existent"}
+	ps.removeSubscription("non-existent", dummySub) // Should return immediately
 }
 
 func TestInMemoryPubSub_TopicCleaning(t *testing.T) {
