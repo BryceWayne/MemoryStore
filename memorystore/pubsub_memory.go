@@ -126,7 +126,10 @@ func (ps *InMemoryPubSub) Unsubscribe(topic string) error {
 		sub.cancel()
 	}
 
-	delete(ps.subscriptions, topic)
+	// We don't delete the topic from the map here.
+	// The cleanup goroutines (triggered by cancel()) will call removeSubscription,
+	// which will remove the subscriptions from the slice and delete the topic
+	// when the last subscription is removed.
 	return nil
 }
 

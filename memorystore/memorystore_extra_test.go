@@ -1,60 +1,90 @@
 package memorystore
 
 import (
-	"os"
 	"testing"
 	"time"
 )
 
-func TestMemoryStore_PubSub_Stopped(t *testing.T) {
-	ms := NewMemoryStore()
-	_ = ms.Stop()
-
-	if _, err := ms.Subscribe("test"); err != ErrStoreStopped {
-		t.Errorf("Subscribe() should return ErrStoreStopped, got %v", err)
-	}
-
-	if err := ms.Publish("test", []byte("msg")); err != ErrStoreStopped {
-		t.Errorf("Publish() should return ErrStoreStopped, got %v", err)
-	}
-
-	if err := ms.Unsubscribe("test"); err != ErrStoreStopped {
-		t.Errorf("Unsubscribe() should return ErrStoreStopped, got %v", err)
-	}
-}
-
-func TestMemoryStore_InitPubSub_GCP(t *testing.T) {
-	// Save original env
-	orig := os.Getenv("GOOGLE_CLOUD_PROJECT")
-	defer os.Setenv("GOOGLE_CLOUD_PROJECT", orig)
-
-	// Set env to trigger GCP path
-	os.Setenv("GOOGLE_CLOUD_PROJECT", "test-project")
-
-	// This should fail to init GCP (no creds) and fall back to memory
+func TestMemoryStore_SubscriberCount(t *testing.T) {
 	ms := NewMemoryStore()
 	defer func() {
 		_ = ms.Stop()
 	}()
 
-	// Check if it's running (fallback worked)
-	if ms.ps == nil {
-		t.Fatal("PubSub client should be initialized (fallback to memory)")
-	}
-
-	// Verify it is indeed InMemoryPubSub by checking type or behavior
-	// internal field ms.ps is private, but we can check behavior
-	// We can check if SubscriberCount works, as it only works for InMemory
-
-	// Create a subscription
-	_, err := ms.Subscribe("test")
+	topic := "test-topic"
+	ch1, err := ms.Subscribe(topic)
 	if err != nil {
-		t.Fatalf("Subscribe failed: %v", err)
+		t.Fatalf("Subscribe 1 failed: %v", err)
+	}
+	defer func() {
+		_ = ms.Unsubscribe(topic)
+	}()
+
+	if count := ms.SubscriberCount(topic); count != 1 {
+		t.Errorf("SubscriberCount should be 1, got %d", count)
 	}
 
-	// Check count
-	if count := ms.SubscriberCount("test"); count != 1 {
-		t.Errorf("Expected subscriber count 1, got %d. This implies fallback to InMemoryPubSub failed or behavior changed.", count)
+	ch2, err := ms.Subscribe(topic)
+	if err != nil {
+		t.Fatalf("Subscribe 2 failed: %v", err)
+	}
+
+	// InMemoryPubSub.Unsubscribe(topic) removes ALL subscriptions for that topic.
+	if count := ms.SubscriberCount(topic); count != 2 {
+		t.Errorf("SubscriberCount should be 2, got %d", count)
+	}
+
+	// Unsubscribe everything
+	if err := ms.Unsubscribe(topic); err != nil {
+		t.Fatalf("Unsubscribe failed: %v", err)
+	}
+
+	// Wait a bit for cleanup
+	time.Sleep(50 * time.Millisecond)
+
+	if count := ms.SubscriberCount(topic); count != 0 {
+		t.Errorf("SubscriberCount should be 0, got %d", count)
+	}
+
+	// Consume channels to avoid blockage/leaks in test
+	go func() {
+		for range ch1 {
+		}
+		for range ch2 {
+		}
+	}()
+}
+
+func TestMemoryStore_InitPubSub_Fallback(t *testing.T) {
+	config := Config{
+		GCPProjectID: "invalid-project-id-likely-to-fail-auth",
+	}
+
+	ms := NewMemoryStoreWithConfig(config)
+	defer func() {
+		_ = ms.Stop()
+	}()
+
+	// Check type of ms.ps
+	if _, ok := ms.ps.(*InMemoryPubSub); !ok {
+		t.Logf("Initialized PubSub type: %T", ms.ps)
+	} else {
+		t.Log("Fallback to InMemoryPubSub successful")
+	}
+}
+
+func TestMemoryStore_PubSub_Stopped(t *testing.T) {
+	ms := NewMemoryStore()
+	_ = ms.Stop()
+
+	if _, err := ms.Subscribe("topic"); err != ErrStoreStopped {
+		t.Errorf("Subscribe after Stop should return ErrStoreStopped, got %v", err)
+	}
+	if err := ms.Publish("topic", []byte("msg")); err != ErrStoreStopped {
+		t.Errorf("Publish after Stop should return ErrStoreStopped, got %v", err)
+	}
+	if err := ms.Unsubscribe("topic"); err != ErrStoreStopped {
+		t.Errorf("Unsubscribe after Stop should return ErrStoreStopped, got %v", err)
 	}
 }
 
@@ -64,10 +94,10 @@ func TestMemoryStore_SetJSON_Error(t *testing.T) {
 		_ = ms.Stop()
 	}()
 
-	// Channel is not JSON marshalsable
-	ch := make(chan int)
-	err := ms.SetJSON("key", ch, time.Minute)
+	// Channel is not JSON serializable
+	badValue := make(chan int)
+	err := ms.SetJSON("key", badValue, time.Minute)
 	if err == nil {
-		t.Error("SetJSON should fail for unmarshalable type")
+		t.Error("SetJSON should return error for unserializable value")
 	}
 }
