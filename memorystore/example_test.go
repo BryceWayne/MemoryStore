@@ -3,18 +3,13 @@ package memorystore_test
 import (
 	json "encoding/json/v2"
 	"fmt"
-	"io"
-	"log"
 	"time"
 
 	"github.com/BryceWayne/MemoryStore/memorystore"
 )
 
 func ExampleMemoryStore_Set() {
-	prev := log.Writer()
-	log.SetOutput(io.Discard)
 	store := memorystore.NewMemoryStore()
-	log.SetOutput(prev)
 	defer func() { _ = store.Stop() }()
 
 	if err := store.Set("greeting", []byte("hello, world"), time.Minute); err != nil {
@@ -30,10 +25,7 @@ func ExampleMemoryStore_Set() {
 }
 
 func ExampleMemoryStore_SetJSON() {
-	prev := log.Writer()
-	log.SetOutput(io.Discard)
 	store := memorystore.NewMemoryStore()
-	log.SetOutput(prev)
 	defer func() { _ = store.Stop() }()
 
 	type User struct {
@@ -56,10 +48,7 @@ func ExampleMemoryStore_SetJSON() {
 }
 
 func ExampleMemoryStore_SetJSONWithOptions() {
-	prev := log.Writer()
-	log.SetOutput(io.Discard)
 	store := memorystore.NewMemoryStore()
-	log.SetOutput(prev)
 	defer func() { _ = store.Stop() }()
 
 	data := map[string]int{"b": 2, "a": 1}
@@ -76,10 +65,7 @@ func ExampleMemoryStore_SetJSONWithOptions() {
 }
 
 func ExampleMemoryStore_SetMulti() {
-	prev := log.Writer()
-	log.SetOutput(io.Discard)
 	store := memorystore.NewMemoryStore()
-	log.SetOutput(prev)
 	defer func() { _ = store.Stop() }()
 
 	items := map[string][]byte{
@@ -98,10 +84,7 @@ func ExampleMemoryStore_SetMulti() {
 }
 
 func ExampleMemoryStore_Subscribe() {
-	prev := log.Writer()
-	log.SetOutput(io.Discard)
 	store := memorystore.NewMemoryStore()
-	log.SetOutput(prev)
 	defer func() { _ = store.Stop() }()
 
 	ch, err := store.Subscribe("events:*")

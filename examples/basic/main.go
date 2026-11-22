@@ -1,9 +1,10 @@
-// main.go
-// Package main provides a demonstration of the memorystore package functionality.
+// Package main demonstrates basic MemoryStore operations, encoding/json/v2
+// serialization, batch operations, and in-memory Pub/Sub.
 package main
 
 import (
 	"log"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
@@ -12,7 +13,7 @@ import (
 	"github.com/BryceWayne/MemoryStore/memorystore"
 )
 
-// Person represents a sample data structure.
+// Person represents a sample JSON-serializable struct.
 type Person struct {
 	Name    string    `json:"name"`
 	Age     int       `json:"age"`
@@ -20,7 +21,6 @@ type Person struct {
 	Created time.Time `json:"created,omitzero"`
 }
 
-// demonstrateBasicOperations shows basic Set/Get operations.
 func demonstrateBasicOperations(ms *memorystore.MemoryStore) {
 	log.Println("=== Demonstrating Basic Operations ===")
 
@@ -31,8 +31,7 @@ func demonstrateBasicOperations(ms *memorystore.MemoryStore) {
 		Created: time.Now(),
 	}
 
-	err := ms.SetJSON(person.UID, person, 2*time.Second)
-	if err != nil {
+	if err := ms.SetJSON(person.UID, &person, 2*time.Second); err != nil {
 		log.Printf("Failed to store person: %v", err)
 		return
 	}
@@ -49,16 +48,13 @@ func demonstrateBasicOperations(ms *memorystore.MemoryStore) {
 	}
 }
 
-// demonstratePubSub shows the publish/subscribe functionality.
-// Note: We use exact topic names to ensure compatibility with GCP PubSub.
 func demonstratePubSub(ms *memorystore.MemoryStore) {
 	log.Println("\n=== Demonstrating PubSub System ===")
 
 	var wg sync.WaitGroup
 	topics := []string{"updates", "alerts"}
-	chans := make(map[string]<-chan []byte)
+	chans := make(map[string]<-chan []byte, len(topics))
 
-	// Subscribe
 	for _, topic := range topics {
 		ch, err := ms.Subscribe(topic)
 		if err != nil {
@@ -69,27 +65,22 @@ func demonstratePubSub(ms *memorystore.MemoryStore) {
 		log.Printf("Subscribed to topic: %s", topic)
 	}
 
-	// Listeners
 	for topic, ch := range chans {
-		wg.Add(1)
-		go func(t string, c <-chan []byte) {
-			defer wg.Done()
+		wg.Go(func() {
 			for {
 				select {
-				case msg, ok := <-c:
+				case msg, ok := <-ch:
 					if !ok {
 						return
 					}
-					log.Printf("[%s] Received: %s", t, string(msg))
-				case <-time.After(3 * time.Second):
+					log.Printf("[%s] Received: %s", topic, string(msg))
+				case <-time.After(500 * time.Millisecond):
 					return
 				}
 			}
-		}(topic, ch)
+		})
 	}
 
-	// Publish
-	time.Sleep(500 * time.Millisecond) // Wait for subscriptions
 	if err := ms.Publish("updates", []byte("System update available")); err != nil {
 		log.Printf("Error publishing to updates: %v", err)
 	}
@@ -99,7 +90,6 @@ func demonstratePubSub(ms *memorystore.MemoryStore) {
 
 	wg.Wait()
 
-	// Unsubscribe
 	for _, topic := range topics {
 		if err := ms.Unsubscribe(topic); err != nil {
 			log.Printf("Error unsubscribing from %s: %v", topic, err)
@@ -108,12 +98,11 @@ func demonstratePubSub(ms *memorystore.MemoryStore) {
 }
 
 func main() {
-	// Example of using GCP PubSub if env var is set
-	if os.Getenv("GOOGLE_CLOUD_PROJECT") == "" {
-		log.Println("Note: Set GOOGLE_CLOUD_PROJECT env var to test GCP PubSub backend")
-	}
-
-	ms := memorystore.NewMemoryStore()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	ms := memorystore.NewMemoryStoreWithConfig(memorystore.Config{
+		Logger:        logger,
+		PubSubTimeout: 5 * time.Second,
+	})
 	defer func() {
 		if err := ms.Stop(); err != nil {
 			log.Printf("Error stopping store: %v", err)

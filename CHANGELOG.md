@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Pluggable `Config.PubSub` field allowing any `PubSubClient` implementation (Redis, NATS, Kafka, GCP Pub/Sub, mocks) to be injected into `MemoryStore`.
+- Context-aware Pub/Sub methods on `MemoryStore`: `SubscribeContext`, `PublishContext`, and `UnsubscribeContext` (with `Config.PubSubTimeout` now enforced by non-context helpers).
+- Optional `SubscriberCounter` interface so any `PubSubClient` backend can expose subscriber counts.
+- Exported `NewInMemoryPubSub()` constructor.
+- Configurable `Config.CleanupInterval` and structured `Config.Logger` (`*slog.Logger`, defaulting to silent `slog.DiscardHandler`).
+- Standalone `github.com/BryceWayne/MemoryStore/pubsub/gcp` sub-module backed by `cloud.google.com/go/pubsub/v2` with cached publisher cleanup.
+- Runnable demo relocated to `examples/basic/main.go`.
+
+### Changed
+- **Zero-dependency core module:** Removed all external dependencies from the root `go.mod` by decoupling Google Cloud Pub/Sub into `pubsub/gcp`.
+- **Context-aware `PubSubClient` interface:** `Subscribe`, `Publish`, and `Unsubscribe` now accept `context.Context` as their first parameter.
+- **Performance optimizations:**
+  - Moved `hits`, `misses`, and `evictions` `atomic.Int64` counters per-shard inside each 64-byte cache-line padded shard, eliminating cross-core cache-line bouncing (**-74.8%** / ~4x faster `GetParallel`: 27.0 ns → **7.88 ns/op**).
+  - Added stack-allocated scratch buffers (up to 128 keys) and small-batch fast paths to `SetMulti` and `GetMulti` (`SetMulti` drops to **3.15 µs/op, 0 B/op, 0 allocs/op**).
+  - Split `InMemoryPubSub` into O(1) exact-topic lookup and wildcard pattern buckets (`Publish` across 100 exact topics runs in **38.6 ns/op, 0 B/op, 0 allocs/op**).
+- Upgraded GitHub Actions workflows to `actions/checkout@v7` and `actions/setup-go@v7` and expanded CI/Makefile/Dependabot to cover both the root module and `pubsub/gcp`.
+- Core `memorystore` statement test coverage increased to **99.1%**.
+
+### Removed
+- `Config.GCPProjectID` and automatic `GOOGLE_CLOUD_PROJECT` detection from core `memorystore` (replaced by injecting `gcp.NewClient(...)` into `Config.PubSub`).
+- Root `main.go` (moved to `examples/basic/main.go`) and `go.sum` (no longer needed with zero root dependencies).
+
 ## [0.1.0] - 2026-11-22
 
 Initial tagged release of **MemoryStore**, built for **Go 1.27+**.

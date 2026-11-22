@@ -6,64 +6,77 @@ import (
 	"sync"
 )
 
-// Constants for PubSub configuration
-const (
-	defaultChannelBuffer = 100 // Default buffer size for subscriber channels
-)
+// defaultChannelBuffer is the buffer capacity for subscriber channels.
+const defaultChannelBuffer = 100
 
-// subscription represents an individual subscriber
+// subscription represents an individual subscriber.
 type subscription struct {
-	topic  string          // The topic this subscription matches
-	ch     chan []byte     // Channel for sending messages to the subscriber
-	ctx    context.Context // Context for managing subscription lifetime
-	cancel func()          // Function to cancel the subscription context
+	topic  string
+	ch     chan []byte
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
-// InMemoryPubSub handles all publish/subscribe operations in memory
+// InMemoryPubSub is a thread-safe, in-memory implementation of PubSubClient
+// and SubscriberCounter supporting exact topics and ':'-delimited wildcard
+// patterns (for example, "user:*" or "orders:*:created").
 type InMemoryPubSub struct {
-	mu            sync.RWMutex
-	subscriptions map[string][]*subscription // Topic -> subscriptions mapping
-	wg            sync.WaitGroup             // For graceful shutdown
-	closed        bool
+	mu           sync.RWMutex
+	exactSubs    map[string][]*subscription // Exact-match topics (O(1) publish lookup)
+	wildcardSubs map[string][]*subscription // Wildcard patterns containing '*'
+	wg           sync.WaitGroup             // Tracks subscription cleanup goroutines
+	closed       bool
 }
 
-// newInMemoryPubSub creates and initializes a new InMemoryPubSub
-func newInMemoryPubSub() *InMemoryPubSub {
+// NewInMemoryPubSub creates and initializes a new InMemoryPubSub broker.
+func NewInMemoryPubSub() *InMemoryPubSub {
 	return &InMemoryPubSub{
-		subscriptions: make(map[string][]*subscription),
+		exactSubs:    make(map[string][]*subscription),
+		wildcardSubs: make(map[string][]*subscription),
 	}
 }
 
-// Subscribe creates a new subscription for the given topic
-func (ps *InMemoryPubSub) Subscribe(topic string) (<-chan []byte, error) {
+func isWildcardPattern(topic string) bool {
+	return strings.ContainsRune(topic, '*')
+}
+
+func (ps *InMemoryPubSub) bucketFor(topic string) map[string][]*subscription {
+	if isWildcardPattern(topic) {
+		return ps.wildcardSubs
+	}
+	return ps.exactSubs
+}
+
+// Subscribe creates a new subscription for the given topic or wildcard pattern.
+func (ps *InMemoryPubSub) Subscribe(ctx context.Context, topic string) (<-chan []byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
 	if ps.closed {
 		return nil, ErrStoreStopped
 	}
-
 	if topic == "" {
 		return nil, ErrInvalidTopic
 	}
 
-	// Create subscription context
-	ctx, cancel := context.WithCancel(context.Background())
+	subCtx, cancel := context.WithCancel(context.Background())
 	ch := make(chan []byte, defaultChannelBuffer)
-
 	sub := &subscription{
 		topic:  topic,
 		ch:     ch,
-		ctx:    ctx,
+		ctx:    subCtx,
 		cancel: cancel,
 	}
 
-	// Add subscription to manager
-	ps.subscriptions[topic] = append(ps.subscriptions[topic], sub)
+	bucket := ps.bucketFor(topic)
+	bucket[topic] = append(bucket[topic], sub)
 
-	// Cleanup goroutine tracked by WaitGroup for graceful shutdown
 	ps.wg.Go(func() {
-		<-ctx.Done()
+		<-subCtx.Done()
 		ps.removeSubscription(topic, sub)
 		close(ch)
 	})
@@ -71,8 +84,13 @@ func (ps *InMemoryPubSub) Subscribe(topic string) (<-chan []byte, error) {
 	return ch, nil
 }
 
-// Publish sends a message to all subscribers matching the given topic
-func (ps *InMemoryPubSub) Publish(topic string, message []byte) error {
+// Publish delivers a message to all subscribers whose exact topic or wildcard
+// pattern matches topic. Slow subscribers whose channel buffer is full are skipped.
+func (ps *InMemoryPubSub) Publish(ctx context.Context, topic string, message []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 
@@ -80,30 +98,42 @@ func (ps *InMemoryPubSub) Publish(topic string, message []byte) error {
 		return ErrStoreStopped
 	}
 
-	// Find all matching subscriptions and publish to them
-	// We support simple pattern matching here for backward compatibility
-	for subTopic, subs := range ps.subscriptions {
-		if matchesTopic(topic, subTopic) {
-			for _, sub := range subs {
-				select {
-				case <-sub.ctx.Done():
-					continue // Skip closed subscriptions
-				default:
-					select {
-					case sub.ch <- message:
-					default:
-						// Channel is full, skip this subscriber
-					}
-				}
-			}
+	// Fast O(1) lookup for exact-topic subscribers.
+	if subs, ok := ps.exactSubs[topic]; ok {
+		deliverToSubscribers(subs, message)
+	}
+
+	// Evaluate wildcard patterns only when wildcard subscribers exist.
+	for pattern, subs := range ps.wildcardSubs {
+		if matchesTopic(topic, pattern) {
+			deliverToSubscribers(subs, message)
 		}
 	}
 
 	return nil
 }
 
-// Unsubscribe cancels all subscriptions for the given topic
-func (ps *InMemoryPubSub) Unsubscribe(topic string) error {
+func deliverToSubscribers(subs []*subscription, message []byte) {
+	for _, sub := range subs {
+		select {
+		case <-sub.ctx.Done():
+			continue
+		default:
+			select {
+			case sub.ch <- message:
+			default:
+				// Channel is full, skip this subscriber.
+			}
+		}
+	}
+}
+
+// Unsubscribe cancels all active subscriptions for the given topic or pattern.
+func (ps *InMemoryPubSub) Unsubscribe(ctx context.Context, topic string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
@@ -111,24 +141,28 @@ func (ps *InMemoryPubSub) Unsubscribe(topic string) error {
 		return ErrStoreStopped
 	}
 
-	subs, exists := ps.subscriptions[topic]
+	subs, exists := ps.bucketFor(topic)[topic]
 	if !exists {
 		return nil
 	}
 
-	// Cancel all subscriptions for this topic
 	for _, sub := range subs {
 		sub.cancel()
 	}
 
-	// We don't delete the topic from the map here.
-	// The cleanup goroutines (triggered by cancel()) will call removeSubscription,
-	// which will remove the subscriptions from the slice and delete the topic
-	// when the last subscription is removed.
 	return nil
 }
 
-// Close shuts down the PubSub manager
+// SubscriberCount returns the number of active subscribers registered under
+// the exact given topic or wildcard pattern.
+func (ps *InMemoryPubSub) SubscriberCount(pattern string) int {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return len(ps.bucketFor(pattern)[pattern])
+}
+
+// Close shuts down the broker, cancels all subscriptions, and waits for
+// cleanup goroutines to exit. Multiple calls are safe and idempotent.
 func (ps *InMemoryPubSub) Close() error {
 	ps.mu.Lock()
 	if ps.closed {
@@ -137,21 +171,25 @@ func (ps *InMemoryPubSub) Close() error {
 	}
 	ps.closed = true
 
-	// Cancel all subscriptions
-	for topic, subs := range ps.subscriptions {
+	for topic, subs := range ps.exactSubs {
 		for _, sub := range subs {
 			sub.cancel()
 		}
-		delete(ps.subscriptions, topic)
+		delete(ps.exactSubs, topic)
+	}
+	for pattern, subs := range ps.wildcardSubs {
+		for _, sub := range subs {
+			sub.cancel()
+		}
+		delete(ps.wildcardSubs, pattern)
 	}
 	ps.mu.Unlock()
 
-	// Wait for all subscription goroutines to finish
 	ps.wg.Wait()
 	return nil
 }
 
-// removeSubscription removes a specific subscription
+// removeSubscription removes a specific subscription from its bucket.
 func (ps *InMemoryPubSub) removeSubscription(topic string, sub *subscription) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
@@ -160,27 +198,28 @@ func (ps *InMemoryPubSub) removeSubscription(topic string, sub *subscription) {
 		return
 	}
 
-	subs, ok := ps.subscriptions[topic]
+	bucket := ps.bucketFor(topic)
+	subs, ok := bucket[topic]
 	if !ok {
 		return
 	}
 
 	for i, s := range subs {
 		if s == sub {
-			// Remove subscription from slice
 			subs = append(subs[:i], subs[i+1:]...)
 			break
 		}
 	}
 
 	if len(subs) == 0 {
-		delete(ps.subscriptions, topic)
+		delete(bucket, topic)
 	} else {
-		ps.subscriptions[topic] = subs
+		bucket[topic] = subs
 	}
 }
 
-// matchesTopic checks if a topic matches a subscription pattern without allocating slices.
+// matchesTopic checks if a topic matches a ':'-delimited subscription pattern
+// without allocating slices.
 func matchesTopic(topic, pattern string) bool {
 	if topic == pattern {
 		return true

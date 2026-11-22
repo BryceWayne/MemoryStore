@@ -1,21 +1,25 @@
 # Makefile for MemoryStore
 
-.PHONY: all build clean test bench lint fmt vet coverage help
+.PHONY: all build clean test bench lint fmt vet coverage run-example help
 
 # Default target
 all: clean fmt vet lint test build
 
-# Build the project
+# Build all modules
 build:
 	@echo "Building MemoryStore..."
-	go build -o memory_store
+	go build ./...
+	@echo "Building pubsub/gcp..."
+	cd pubsub/gcp && go build ./...
 
-# Run tests with race detection and coverage
+# Run tests with race detection and coverage across all modules
 test:
-	@echo "Running tests..."
+	@echo "Running tests (root module)..."
 	go test -count=1 -race -cover ./...
+	@echo "Running tests (pubsub/gcp)..."
+	cd pubsub/gcp && go test -count=1 -race -cover ./...
 
-# Generate HTML coverage report
+# Generate HTML coverage report for core memorystore
 coverage:
 	@echo "Generating coverage report..."
 	go test -race -coverprofile=coverage.out -covermode=atomic ./...
@@ -25,22 +29,30 @@ coverage:
 # Run benchmarks with memory allocation stats
 bench:
 	@echo "Running benchmarks..."
-	go test -run='^$$' -bench=. -benchmem ./...
+	go test -run='^$$' -bench=. -benchmem ./memorystore
 
-# Run linter
+# Run linter across all modules
 lint:
-	@echo "Running linter..."
+	@echo "Running linter (root module)..."
 	golangci-lint run ./...
+	@echo "Running linter (pubsub/gcp)..."
+	cd pubsub/gcp && golangci-lint run --config ../../.golangci.yml ./...
 
-# Format code
+# Format code across all modules
 fmt:
 	@echo "Formatting code..."
 	go fmt ./...
+	cd pubsub/gcp && go fmt ./...
 
-# Vet code
+# Vet code across all modules
 vet:
 	@echo "Vetting code..."
 	go vet ./...
+	cd pubsub/gcp && go vet ./...
+
+# Run the basic usage example
+run-example:
+	go run ./examples/basic
 
 # Clean build and coverage artifacts
 clean:
@@ -53,13 +65,14 @@ help:
 	@echo "Usage: make [target]"
 	@echo ""
 	@echo "Targets:"
-	@echo "  all       Run clean, fmt, vet, lint, test, and build"
-	@echo "  build     Build the project"
-	@echo "  test      Run tests with race detector and coverage"
-	@echo "  coverage  Generate HTML coverage report (coverage.html)"
-	@echo "  bench     Run benchmarks with memory stats"
-	@echo "  lint      Run linter (golangci-lint)"
-	@echo "  fmt       Format code (go fmt)"
-	@echo "  vet       Vet code (go vet)"
-	@echo "  clean     Remove build and test artifacts"
-	@echo "  help      Show this help message"
+	@echo "  all          Run clean, fmt, vet, lint, test, and build"
+	@echo "  build        Build all modules"
+	@echo "  test         Run tests with race detector and coverage"
+	@echo "  coverage     Generate HTML coverage report (coverage.html)"
+	@echo "  bench        Run benchmarks with memory stats"
+	@echo "  lint         Run linter (golangci-lint) across all modules"
+	@echo "  fmt          Format code (go fmt) across all modules"
+	@echo "  vet          Vet code (go vet) across all modules"
+	@echo "  run-example  Run examples/basic"
+	@echo "  clean        Remove build and test artifacts"
+	@echo "  help         Show this help message"

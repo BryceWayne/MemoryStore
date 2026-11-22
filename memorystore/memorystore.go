@@ -4,20 +4,32 @@ import (
 	"context"
 	json "encoding/json/v2"
 	"hash/maphash"
-	"log"
+	"log/slog"
 	"math"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-// numShards is the number of storage shards. Must be a power of 2 and <= 256.
-const numShards = 256
+const (
+	// numShards is the number of storage shards. Must be a power of 2 and <= 256.
+	numShards = 256
+
+	// defaultCleanupInterval is the default period for background expiration sweeps.
+	defaultCleanupInterval = time.Minute
+
+	// batchStackLimit is the maximum batch size that uses stack-allocated scratch
+	// storage in SetMulti / GetMulti before spilling to a single heap slice.
+	batchStackLimit = 128
+
+	// smallBatchThreshold is the batch size at or below which direct per-key
+	// shard operations avoid initializing the 256-entry shard head table.
+	smallBatchThreshold = 4
+)
 
 // emptyHeads is a pre-initialized sentinel array of -1 values used by batch
 // operations to group keys by shard without heap-allocating per-shard maps.
-var emptyHeads [numShards]int
+var emptyHeads [numShards]int32
 
 func init() {
 	for i := range emptyHeads {
@@ -39,58 +51,80 @@ type StoreMetrics struct {
 	Evictions int64 // Total number of items evicted (expired)
 }
 
+// shard holds one partition of the cache along with shard-local atomic counters.
+// Keeping counters per-shard eliminates cross-core cache-line contention on
+// hot Get/Set paths while fitting cleanly into a single 64-byte cache line on
+// 64-bit platforms (24B RWMutex + 8B map + 24B counters + 8B pad = 64B).
 type shard struct {
-	mu    sync.RWMutex
-	store map[string]item
-	_     [32]byte // Pad to 64-byte cache line to avoid false sharing between adjacent shards
+	mu        sync.RWMutex
+	store     map[string]item
+	hits      atomic.Int64
+	misses    atomic.Int64
+	evictions atomic.Int64
+	_         [8]byte
 }
 
-// MemoryStore implements an in-memory cache with automatic cleanup of expired items.
-// It is safe for concurrent use by multiple goroutines.
+// MemoryStore implements a thread-safe, sharded in-memory cache with automatic
+// cleanup of expired items and a pluggable Publish/Subscribe system.
 type MemoryStore struct {
 	// lifecycleMu protects the lifecycle state (cancelFunc)
 	lifecycleMu sync.RWMutex
 
-	hashSeed   maphash.Seed       // Per-instance seed for hardware-accelerated shard hashing
-	baseTime   time.Time          // Monotonic reference time for pointer-free item expiration
-	shards     [numShards]shard   // Inline cache-line padded sharded storage
-	ps         PubSubClient       // PubSub client for cache events
-	ctx        context.Context    // Context for controlling the cleanup worker
-	cancelFunc context.CancelFunc // Function to stop the cleanup worker
-	wg         sync.WaitGroup     // WaitGroup for cleanup goroutine synchronization
-
-	// Metrics
-	hits      atomic.Int64 // Atomic counter for cache hits
-	misses    atomic.Int64 // Atomic counter for cache misses
-	evictions atomic.Int64 // Atomic counter for evicted items
+	hashSeed        maphash.Seed       // Per-instance seed for hardware-accelerated shard hashing
+	baseTime        time.Time          // Monotonic reference time for pointer-free item expiration
+	shards          [numShards]shard   // Inline cache-line padded sharded storage
+	ps              PubSubClient       // Pluggable Pub/Sub client
+	pubSubTimeout   time.Duration      // Default timeout for non-context Pub/Sub helpers
+	cleanupInterval time.Duration      // Background expiration sweep interval
+	logger          *slog.Logger       // Structured logger (defaults to discard)
+	ctx             context.Context    // Context for controlling the cleanup worker
+	cancelFunc      context.CancelFunc // Function to stop the cleanup worker
+	wg              sync.WaitGroup     // WaitGroup for cleanup goroutine synchronization
 }
 
-// NewMemoryStore creates and initializes a new MemoryStore instance.
-// It checks for GOOGLE_CLOUD_PROJECT environment variable to decide whether to use GCP PubSub.
-// Use NewMemoryStoreWithConfig for more control.
+// NewMemoryStore creates and initializes a new MemoryStore instance using
+// default settings (InMemoryPubSub, 1-minute cleanup interval, silent logger).
+// Use NewMemoryStoreWithConfig to inject a custom PubSubClient, logger,
+// cleanup interval, or Pub/Sub timeout.
 func NewMemoryStore() *MemoryStore {
-	config := Config{}
-	if projectID := os.Getenv("GOOGLE_CLOUD_PROJECT"); projectID != "" {
-		config.GCPProjectID = projectID
-	}
-	return NewMemoryStoreWithConfig(config)
+	return NewMemoryStoreWithConfig(Config{})
 }
 
 // NewMemoryStoreWithConfig creates a new MemoryStore with the provided configuration.
 func NewMemoryStoreWithConfig(config Config) *MemoryStore {
 	ctx, cancel := context.WithCancel(context.Background())
+
+	logger := config.Logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+
+	cleanupInterval := config.CleanupInterval
+	if cleanupInterval <= 0 {
+		cleanupInterval = defaultCleanupInterval
+	}
+
+	ps := config.PubSub
+	if ps == nil {
+		ps = NewInMemoryPubSub()
+		logger.Debug("initialized default in-memory pubsub")
+	}
+
 	ms := &MemoryStore{
-		hashSeed:   maphash.MakeSeed(),
-		baseTime:   time.Now(),
-		ctx:        ctx,
-		cancelFunc: cancel,
+		hashSeed:        maphash.MakeSeed(),
+		baseTime:        time.Now(),
+		ps:              ps,
+		pubSubTimeout:   config.PubSubTimeout,
+		cleanupInterval: cleanupInterval,
+		logger:          logger,
+		ctx:             ctx,
+		cancelFunc:      cancel,
 	}
 
 	for i := range ms.shards {
 		ms.shards[i].store = make(map[string]item)
 	}
 
-	ms.initPubSub(config)
 	ms.startCleanupWorker()
 	return ms
 }
@@ -123,14 +157,10 @@ func (m *MemoryStore) getShard(key string) *shard {
 	return &m.shards[m.shardIndex(key)]
 }
 
-// Stop gracefully shuts down the MemoryStore by stopping the cleanup goroutine
-// and releasing associated resources. After calling Stop, the store cannot be used.
-// Multiple calls to Stop will not cause a panic and return nil.
-//
-// Example:
-//
-//	store := NewMemoryStore()
-//	defer store.Stop()
+// Stop gracefully shuts down the MemoryStore by stopping the cleanup goroutine,
+// closing the configured PubSubClient, and releasing stored data.
+// After calling Stop, the store cannot be used. Multiple calls to Stop are safe
+// and return nil.
 func (m *MemoryStore) Stop() error {
 	m.lifecycleMu.Lock()
 	defer m.lifecycleMu.Unlock()
@@ -142,12 +172,18 @@ func (m *MemoryStore) Stop() error {
 	m.cancelFunc()
 	m.cancelFunc = nil
 
-	m.cleanupPubSub()
+	var closeErr error
+	if m.ps != nil {
+		if err := m.ps.Close(); err != nil {
+			closeErr = err
+			m.logger.Error("error closing pubsub client", "error", err)
+		}
+	}
 
-	// Wait for cleanup goroutine to finish
+	// Wait for cleanup goroutine to finish.
 	m.wg.Wait()
 
-	// Clear the store to free up memory
+	// Clear the store to free up memory.
 	for i := range m.shards {
 		s := &m.shards[i]
 		s.mu.Lock()
@@ -155,18 +191,11 @@ func (m *MemoryStore) Stop() error {
 		s.mu.Unlock()
 	}
 
-	return nil
+	return closeErr
 }
 
 // IsStopped returns true if the MemoryStore has been stopped and can no longer be used.
 // This method is safe for concurrent use.
-//
-// Example:
-//
-//	if store.IsStopped() {
-//	    log.Println("Store is no longer available")
-//	    return
-//	}
 func (m *MemoryStore) IsStopped() bool {
 	m.lifecycleMu.RLock()
 	defer m.lifecycleMu.RUnlock()
@@ -174,10 +203,10 @@ func (m *MemoryStore) IsStopped() bool {
 }
 
 // startCleanupWorker initiates a background goroutine that periodically
-// removes expired items from the cache. The cleanup interval is set to 1 minute.
+// removes expired items from the cache.
 func (m *MemoryStore) startCleanupWorker() {
 	m.wg.Go(func() {
-		ticker := time.NewTicker(1 * time.Minute)
+		ticker := time.NewTicker(m.cleanupInterval)
 		defer ticker.Stop()
 
 		for {
@@ -192,13 +221,12 @@ func (m *MemoryStore) startCleanupWorker() {
 }
 
 // cleanupExpiredItems removes all expired items from the cache.
-// It iterates over shards and cleans them one by one to avoid global locking.
+// It iterates over shards one by one to avoid global locking.
 func (m *MemoryStore) cleanupExpiredItems() {
 	now := m.nowNano()
-	var evicted int64
 	for i := range m.shards {
 		s := &m.shards[i]
-		// Lock only the current shard
+		var evicted int64
 		s.mu.Lock()
 		for key, it := range s.store {
 			if now >= it.expiresAt {
@@ -207,15 +235,14 @@ func (m *MemoryStore) cleanupExpiredItems() {
 			}
 		}
 		s.mu.Unlock()
-	}
-	if evicted > 0 {
-		m.evictions.Add(evicted)
+		if evicted > 0 {
+			s.evictions.Add(evicted)
+		}
 	}
 }
 
 // Set stores a raw byte slice in the cache with the specified key and duration.
-// The item will automatically expire after the specified duration.
-// If an error occurs, it will be returned to the caller.
+// Items with duration <= 0 expire immediately.
 func (m *MemoryStore) Set(key string, value []byte, duration time.Duration) error {
 	exp := m.expireAt(duration)
 	s := m.getShard(key)
@@ -230,17 +257,7 @@ func (m *MemoryStore) Set(key string, value []byte, duration time.Duration) erro
 }
 
 // SetJSON stores a JSON-serializable value in the cache using encoding/json/v2.
-// The value is serialized to JSON before storage.
 // Returns an error if JSON marshaling fails.
-//
-// Example:
-//
-//	type User struct {
-//	    Name string
-//	    Age  int
-//	}
-//	user := User{Name: "John", Age: 30}
-//	err := cache.SetJSON("user:123", user, 1*time.Hour)
 func (m *MemoryStore) SetJSON(key string, value any, duration time.Duration) error {
 	data, err := json.Marshal(value)
 	if err != nil {
@@ -250,7 +267,7 @@ func (m *MemoryStore) SetJSON(key string, value any, duration time.Duration) err
 }
 
 // SetJSONWithOptions stores a JSON-serializable value in the cache using encoding/json/v2
-// with the provided marshal/encode options (such as json.Deterministic or jsonv1.DefaultOptionsV1).
+// with the provided marshal/encode options (such as json.Deterministic or encoding/json.DefaultOptionsV1).
 func (m *MemoryStore) SetJSONWithOptions(key string, value any, duration time.Duration, opts ...json.Options) error {
 	data, err := json.Marshal(value, opts...)
 	if err != nil {
@@ -260,8 +277,7 @@ func (m *MemoryStore) SetJSONWithOptions(key string, value any, duration time.Du
 }
 
 // Get retrieves a value from the cache.
-// Returns the value and a boolean indicating whether the key was found.
-// If the item has expired, returns (nil, false).
+// Returns the value and true if the key exists and has not expired; otherwise returns (nil, false).
 func (m *MemoryStore) Get(key string) ([]byte, bool) {
 	s := m.getShard(key)
 	s.mu.RLock()
@@ -269,27 +285,17 @@ func (m *MemoryStore) Get(key string) ([]byte, bool) {
 	s.mu.RUnlock()
 
 	if !exists || m.nowNano() >= it.expiresAt {
-		m.misses.Add(1)
+		s.misses.Add(1)
 		return nil, false
 	}
 
-	m.hits.Add(1)
+	s.hits.Add(1)
 	return it.value, true
 }
 
-// GetJSON retrieves and deserializes a JSON value from the cache into the provided destination
+// GetJSON retrieves and deserializes a JSON value from the cache into dest
 // using encoding/json/v2.
-// Returns a boolean indicating if the key was found and any error that occurred during deserialization.
-//
-// Example:
-//
-//	var user User
-//	exists, err := cache.GetJSON("user:123", &user)
-//	if err != nil {
-//	    // Handle error
-//	} else if exists {
-//	    fmt.Printf("Found user: %+v\n", user)
-//	}
+// Returns (false, nil) if the key does not exist or has expired.
 func (m *MemoryStore) GetJSON(key string, dest any) (bool, error) {
 	data, exists := m.Get(key)
 	if !exists {
@@ -303,8 +309,8 @@ func (m *MemoryStore) GetJSON(key string, dest any) (bool, error) {
 	return true, nil
 }
 
-// GetJSONWithOptions retrieves and deserializes a JSON value from the cache into the provided
-// destination using encoding/json/v2 with the given unmarshal/decode options.
+// GetJSONWithOptions retrieves and deserializes a JSON value from the cache into dest
+// using encoding/json/v2 with the given unmarshal/decode options.
 func (m *MemoryStore) GetJSONWithOptions(key string, dest any, opts ...json.Options) (bool, error) {
 	data, exists := m.Get(key)
 	if !exists {
@@ -330,22 +336,39 @@ func (m *MemoryStore) Delete(key string) {
 type multiSetEntry struct {
 	key   string
 	value []byte
-	next  int
+	next  int32
 }
 
-// SetMulti stores multiple key-value pairs in the cache.
-// This is more efficient than calling Set multiple times as it groups keys by shard.
-// All items will have the same expiration duration.
+// SetMulti stores multiple key-value pairs in the cache with the same expiration duration.
+// Keys are grouped by shard to minimize lock acquisitions and heap allocations.
 func (m *MemoryStore) SetMulti(items map[string][]byte, duration time.Duration) error {
-	if len(items) == 0 {
+	n := len(items)
+	if n == 0 {
 		return nil
 	}
 
 	expiresAt := m.expireAt(duration)
+	if n <= smallBatchThreshold {
+		for key, value := range items {
+			s := m.getShard(key)
+			s.mu.Lock()
+			s.store[key] = item{value: value, expiresAt: expiresAt}
+			s.mu.Unlock()
+		}
+		return nil
+	}
+
 	heads := emptyHeads
 	var touched [numShards]uint8
 	touchedCount := 0
-	entries := make([]multiSetEntry, 0, len(items))
+
+	var stackEntries [batchStackLimit]multiSetEntry
+	var entries []multiSetEntry
+	if n <= batchStackLimit {
+		entries = stackEntries[:0]
+	} else {
+		entries = make([]multiSetEntry, 0, n)
+	}
 
 	for key, value := range items {
 		idx := m.shardIndex(key)
@@ -358,10 +381,9 @@ func (m *MemoryStore) SetMulti(items map[string][]byte, duration time.Duration) 
 			value: value,
 			next:  heads[idx],
 		})
-		heads[idx] = len(entries) - 1
+		heads[idx] = int32(len(entries) - 1)
 	}
 
-	// Apply updates per touched shard
 	for _, shardIdx := range touched[:touchedCount] {
 		s := &m.shards[shardIdx]
 		s.mu.Lock()
@@ -378,18 +400,42 @@ func (m *MemoryStore) SetMulti(items map[string][]byte, duration time.Duration) 
 }
 
 // GetMulti retrieves multiple values from the cache.
-// It returns a map of found items. Keys that don't exist or are expired are omitted.
+// Keys that don't exist or have expired are omitted from the returned map.
 func (m *MemoryStore) GetMulti(keys []string) map[string][]byte {
-	result := make(map[string][]byte, len(keys))
-	if len(keys) == 0 {
+	n := len(keys)
+	result := make(map[string][]byte, n)
+	if n == 0 {
 		return result
 	}
 
 	now := m.nowNano()
+	if n <= smallBatchThreshold {
+		for _, key := range keys {
+			s := m.getShard(key)
+			s.mu.RLock()
+			it, exists := s.store[key]
+			s.mu.RUnlock()
+			if exists && now < it.expiresAt {
+				result[key] = it.value
+				s.hits.Add(1)
+			} else {
+				s.misses.Add(1)
+			}
+		}
+		return result
+	}
+
 	heads := emptyHeads
 	var touched [numShards]uint8
 	touchedCount := 0
-	next := make([]int, len(keys))
+
+	var stackNext [batchStackLimit]int32
+	var next []int32
+	if n <= batchStackLimit {
+		next = stackNext[:n]
+	} else {
+		next = make([]int32, n)
+	}
 
 	for i, key := range keys {
 		idx := m.shardIndex(key)
@@ -398,12 +444,12 @@ func (m *MemoryStore) GetMulti(keys []string) map[string][]byte {
 			touchedCount++
 		}
 		next[i] = heads[idx]
-		heads[idx] = i
+		heads[idx] = int32(i)
 	}
 
-	var hits, misses int64
 	for _, shardIdx := range touched[:touchedCount] {
 		s := &m.shards[shardIdx]
+		var hits, misses int64
 		s.mu.RLock()
 		for i := heads[shardIdx]; i != -1; i = next[i] {
 			key := keys[i]
@@ -415,100 +461,93 @@ func (m *MemoryStore) GetMulti(keys []string) map[string][]byte {
 			}
 		}
 		s.mu.RUnlock()
-	}
-
-	if hits > 0 {
-		m.hits.Add(hits)
-	}
-	if misses > 0 {
-		m.misses.Add(misses)
+		if hits > 0 {
+			s.hits.Add(hits)
+		}
+		if misses > 0 {
+			s.misses.Add(misses)
+		}
 	}
 
 	return result
 }
 
-// GetMetrics returns the current statistics of the MemoryStore.
-// It returns a copy of the metrics to ensure thread safety.
+// GetMetrics returns a point-in-time snapshot of cache statistics.
 func (m *MemoryStore) GetMetrics() StoreMetrics {
-	itemCount := 0
+	var metrics StoreMetrics
 	for i := range m.shards {
 		s := &m.shards[i]
 		s.mu.RLock()
-		itemCount += len(s.store)
+		metrics.Items += len(s.store)
 		s.mu.RUnlock()
+		metrics.Hits += s.hits.Load()
+		metrics.Misses += s.misses.Load()
+		metrics.Evictions += s.evictions.Load()
 	}
 
-	return StoreMetrics{
-		Items:     itemCount,
-		Hits:      m.hits.Load(),
-		Misses:    m.misses.Load(),
-		Evictions: m.evictions.Load(),
-	}
+	return metrics
 }
 
-// Subscribe subscribes to a topic.
+func (m *MemoryStore) defaultPubSubContext() (context.Context, context.CancelFunc) {
+	if m.pubSubTimeout > 0 {
+		return context.WithTimeout(context.Background(), m.pubSubTimeout)
+	}
+	return context.Background(), func() {}
+}
+
+// Subscribe subscribes to a topic using the store's default Pub/Sub context
+// (applying Config.PubSubTimeout if configured).
 func (m *MemoryStore) Subscribe(topic string) (<-chan []byte, error) {
+	ctx, cancel := m.defaultPubSubContext()
+	defer cancel()
+	return m.SubscribeContext(ctx, topic)
+}
+
+// SubscribeContext subscribes to a topic with the provided context.
+func (m *MemoryStore) SubscribeContext(ctx context.Context, topic string) (<-chan []byte, error) {
 	if m.IsStopped() {
 		return nil, ErrStoreStopped
 	}
-	return m.ps.Subscribe(topic)
+	return m.ps.Subscribe(ctx, topic)
 }
 
-// Publish publishes a message to a topic.
+// Publish publishes a message to a topic using the store's default Pub/Sub context
+// (applying Config.PubSubTimeout if configured).
 func (m *MemoryStore) Publish(topic string, message []byte) error {
+	ctx, cancel := m.defaultPubSubContext()
+	defer cancel()
+	return m.PublishContext(ctx, topic, message)
+}
+
+// PublishContext publishes a message to a topic with the provided context.
+func (m *MemoryStore) PublishContext(ctx context.Context, topic string, message []byte) error {
 	if m.IsStopped() {
 		return ErrStoreStopped
 	}
-	return m.ps.Publish(topic, message)
+	return m.ps.Publish(ctx, topic, message)
 }
 
-// Unsubscribe unsubscribes from a topic.
+// Unsubscribe unsubscribes from a topic using the store's default Pub/Sub context
+// (applying Config.PubSubTimeout if configured).
 func (m *MemoryStore) Unsubscribe(topic string) error {
+	ctx, cancel := m.defaultPubSubContext()
+	defer cancel()
+	return m.UnsubscribeContext(ctx, topic)
+}
+
+// UnsubscribeContext unsubscribes from a topic with the provided context.
+func (m *MemoryStore) UnsubscribeContext(ctx context.Context, topic string) error {
 	if m.IsStopped() {
 		return ErrStoreStopped
 	}
-	return m.ps.Unsubscribe(topic)
+	return m.ps.Unsubscribe(ctx, topic)
 }
 
-// SubscriberCount returns the number of subscribers for a pattern.
-// Note: This is not supported by the common interface and will return 0 or error in future.
-// For now, it only works if the underlying implementation is In-Memory.
+// SubscriberCount returns the number of subscribers for a topic or pattern
+// if the configured PubSubClient implements SubscriberCounter; otherwise returns 0.
 func (m *MemoryStore) SubscriberCount(pattern string) int {
-	// Not part of the interface.
-	// If we need this, we should add it to the interface or check type.
-	if ps, ok := m.ps.(*InMemoryPubSub); ok {
-		ps.mu.RLock()
-		defer ps.mu.RUnlock()
-		count := 0
-		for p, subs := range ps.subscriptions {
-			if p == pattern {
-				count += len(subs)
-			}
-		}
-		return count
+	if counter, ok := m.ps.(SubscriberCounter); ok {
+		return counter.SubscriberCount(pattern)
 	}
 	return 0
-}
-
-// initPubSub initializes the PubSub system.
-func (m *MemoryStore) initPubSub(config Config) {
-	if config.GCPProjectID != "" {
-		ps, err := NewGCPPubSub(context.Background(), config.GCPProjectID)
-		if err == nil {
-			m.ps = ps
-			log.Printf("Initialized GCP PubSub with project %s", config.GCPProjectID)
-			return
-		}
-		log.Printf("Failed to initialize GCP PubSub: %v. Falling back to In-Memory.", err)
-	}
-
-	m.ps = newInMemoryPubSub()
-	log.Println("Initialized In-Memory PubSub")
-}
-
-// cleanupPubSub cleans up the PubSub system.
-func (m *MemoryStore) cleanupPubSub() {
-	if m.ps != nil {
-		_ = m.ps.Close()
-	}
 }
