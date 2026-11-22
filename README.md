@@ -11,7 +11,7 @@ MemoryStore is a high-performance, thread-safe, in-memory key-value store implem
 - ⏰ Automatic key expiration
 - 🧹 Background cleanup of expired keys
 - 📦 Support for both raw bytes and JSON data
-- 💪 High-performance using go-json
+- 💪 High-performance using Go 1.27's standard library `encoding/json/v2` (with zero external JSON dependencies)
 - 🚀 Batch operations (`SetMulti`, `GetMulti`)
 - 📊 Built-in Metrics and Monitoring
 - 📡 Agnostic Publish/Subscribe system (In-Memory & GCP PubSub)
@@ -302,8 +302,12 @@ sequenceDiagram
 
 ## Performance Considerations
 
-- Uses `github.com/goccy/go-json` for faster JSON operations
-- Minimizes lock contention with RWMutex
+- Built for **Go 1.27** (taking advantage of Green Tea GC, size-specialized small allocations, and the standard library `encoding/json/v2` engine)
+- Uses `encoding/json/v2` for strict, low-allocation JSON serialization/deserialization (with optional `SetJSONWithOptions` / `GetJSONWithOptions` for custom `json.Options` or `encoding/json.DefaultOptionsV1()`)
+- Zero-allocation hardware-accelerated shard hashing via `hash/maphash`
+- Cache-line padded inline sharded storage with `sync.RWMutex` to minimize lock contention and false sharing
+- Pointer-free monotonic expiration timestamps to reduce GC scan overhead
+- Low-allocation sharded batch operations (`SetMulti`, `GetMulti`) and zero-allocation PubSub topic matching
 - Efficient background cleanup of expired items
 - Memory-efficient storage using byte slices
 
@@ -347,8 +351,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Acknowledgments
 
-- Thanks to the Go team for the amazing standard library
-- [go-json](https://github.com/goccy/go-json) for high-performance JSON operations
+- Thanks to the Go team for the amazing Go 1.27 standard library (`encoding/json/v2`, `hash/maphash`, `uuid`, and the Green Tea GC)
 
 ## Support
 
