@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security Vulnerability Report
+    url: https://github.com/BryceWayne/MemoryStore/security/advisories/new
+    about: Privately report a security vulnerability (do not open a public issue)
+  - name: API Documentation (pkg.go.dev)
+    url: https://pkg.go.dev/github.com/BryceWayne/MemoryStore/memorystore
+    about: Browse Go package documentation and examples
+  - name: GitHub Discussions
+    url: https://github.com/BryceWayne/MemoryStore/discussions
+    about: Ask questions and discuss ideas with the community

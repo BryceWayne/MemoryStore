@@ -68,7 +68,7 @@ func (g *GCPPubSub) Subscribe(topicName string) (<-chan []byte, error) {
 	subID := fmt.Sprintf("memorystore-sub-%s-%s", topicName, uuid.New().String())
 	sub, err := g.client.CreateSubscription(context.Background(), subID, pubsub.SubscriptionConfig{
 		Topic:            topic,
-		ExpirationPolicy: time.Duration(24 * time.Hour), // Auto-delete if unused
+		ExpirationPolicy: 24 * time.Hour, // Auto-delete if unused
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create subscription: %w", err)

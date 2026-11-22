@@ -1,4 +1,3 @@
-// memorystore/pubsub_memory.go
 package memorystore
 
 import (

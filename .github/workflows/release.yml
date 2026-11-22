@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache: true
+
+      - name: Verify dependencies
+        run: |
+          go mod download
+          go mod verify
+
+      - name: Verify formatting
+        run: |
+          gofmt -l . > gofmt_diff.txt
+          if [ -s gofmt_diff.txt ]; then
+            echo "Unformatted files found:"
+            cat gofmt_diff.txt
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Install golangci-lint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.15.0
+
+      - name: Lint
+        run: golangci-lint run ./...
+
+      - name: Test with race detector
+        run: go test -count=1 -race -cover ./...
+
+      - name: Build
+        run: go build -v ./...
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "MemoryStore ${GITHUB_REF_NAME}" \
+            --generate-notes

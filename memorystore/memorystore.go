@@ -1,7 +1,3 @@
-// memorystore/memorystore.go
-// Package memorystore provides a simple in-memory cache implementation with automatic cleanup
-// of expired items. It supports both raw byte storage and JSON serialization/deserialization
-// of structured data using Go's encoding/json/v2 package.
 package memorystore
 
 import (
