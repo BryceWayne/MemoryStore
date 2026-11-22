@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Distributed Cache Invalidation Backplane:** Setting `Config.InvalidationTopic` automatically broadcasts compact `encoding/json/v2` invalidation events on local `Set`, `SetMulti`, and `Delete` calls over any `PubSubClient` (`InMemoryPubSub`, `pubsub/gcp`, `pubsub/azure`, or custom brokers), with per-instance RFC 9562 UUID echo suppression (`MemoryStore.InstanceID()`).
+- **Go 1.27 Generic Methods & Stampede Protection:**
+  - `MemoryStore.GetJSONAs[T](key, opts...)` for typed `encoding/json/v2` reads.
+  - `MemoryStore.GetOrLoad(ctx, key, ttl, loader)` and `MemoryStore.GetOrLoadJSON[T](ctx, key, ttl, loader, opts...)` with zero-dependency singleflight coalescing so concurrent cache misses invoke the loader only once.
+- **Bounded Capacity & Eviction Callbacks:**
+  - `Config.MaxItems` and `Config.MaxBytes` enforcing soft global limits via volatile-TTL sampled eviction with zero overhead on unbounded caches.
+  - `Config.OnEvict` callback (`EvictExpired`, `EvictCapacity`, `EvictDeleted`) invoked safely outside shard locks.
+  - `StoreMetrics.Bytes` tracking stored key + value payload bytes inside the existing 64-byte `shard` cache line.
+- **Head-to-Head Benchmarks Sub-Module (`benchmarks/`) & Branded Chart (`docs/images/benchmarks.svg`):** Isolated benchmark suite comparing `MemoryStore` against `go-cache`, `bigcache/v3`, `freecache`, `otter/v2`, and `ristretto/v2` (`make bench-compare`).
 - Standalone `github.com/BryceWayne/MemoryStore/pubsub/azure` sub-module implementing `memorystore.PubSubClient` using Azure Service Bus (`azservicebus` + `azservicebus/admin`) with Managed Identity (`azcore.TokenCredential`) and connection string auth, ephemeral auto-managed or pre-provisioned RBAC subscription modes, PeekLock / ReceiveAndDelete support, and cached senders.
 - Custom branded SVG architecture diagram (`docs/images/architecture.svg`) in `README.md`.
 

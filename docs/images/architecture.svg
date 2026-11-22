@@ -67,8 +67,8 @@
 
   <!-- Card B: JSON v2 -->
   <rect x="238" y="114" width="204" height="44" rx="7" fill="#0B172A" stroke="#00ADD8" stroke-opacity="0.75" stroke-width="1.2"/>
-  <text x="248" y="130" class="mono label" font-weight="700" fill="#7DD3FC">encoding/json/v2</text>
-  <text x="248" y="147" class="mono muted" font-size="9.5">SetJSON/GetJSON • *WithOptions</text>
+  <text x="248" y="130" class="mono label" font-weight="700" fill="#7DD3FC">encoding/json/v2 &amp; Generics</text>
+  <text x="248" y="147" class="mono muted" font-size="9.2">GetJSONAs[T] • GetOrLoadJSON</text>
 
   <!-- Card C: Pub/Sub API -->
   <rect x="452" y="114" width="184" height="44" rx="7" fill="#0B172A" stroke="#10B981" stroke-opacity="0.75" stroke-width="1.2"/>
@@ -190,7 +190,7 @@
 
   <!-- Card 2: 64-Byte Cache-Line Shard Layout -->
   <rect x="664" y="186" width="268" height="154" rx="10" class="panel"/>
-  <text x="680" y="207" class="sans panel-title" fill="#60A5FA">2. shard Struct (64B Padded)</text>
+  <text x="680" y="207" class="sans panel-title" fill="#60A5FA">2. shard Struct (64B Aligned)</text>
   <rect x="680" y="218" width="236" height="22" rx="5" fill="#0F172A" stroke="#334155"/>
   <text x="690" y="229" class="mono" font-size="10.2" fill="#E2E8F0" dominant-baseline="central">mu: sync.RWMutex</text>
   <text x="906" y="229" class="mono" font-size="9.5" fill="#64748B" text-anchor="end" dominant-baseline="central">24B</text>
@@ -200,8 +200,8 @@
   <rect x="680" y="270" width="236" height="22" rx="5" fill="#0F172A" stroke="#334155"/>
   <text x="690" y="281" class="mono" font-size="10.2" fill="#34D399" dominant-baseline="central">hits/misses/evictions</text>
   <text x="906" y="281" class="mono" font-size="9.5" fill="#64748B" text-anchor="end" dominant-baseline="central">24B</text>
-  <rect x="680" y="296" width="236" height="20" rx="5" fill="#0B172A" stroke="#334155" stroke-dasharray="3 2"/>
-  <text x="690" y="306" class="mono" font-size="10" fill="#94A3B8" dominant-baseline="central">_ [8]byte pad (1 cache line)</text>
+  <rect x="680" y="296" width="236" height="20" rx="5" fill="#0B172A" stroke="#334155"/>
+  <text x="690" y="306" class="mono" font-size="10" fill="#FBBF24" dominant-baseline="central">bytes: int64 (MaxBytes)</text>
   <text x="906" y="306" class="mono" font-size="9.5" fill="#64748B" text-anchor="end" dominant-baseline="central">8B</text>
   <text x="680" y="330" class="mono muted">item: []byte + int64 expiresAt (32B)</text>
 
