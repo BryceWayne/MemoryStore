@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-22
+
 ### Added
 - Pluggable `Config.PubSub` field allowing any `PubSubClient` implementation (Redis, NATS, Kafka, GCP Pub/Sub, mocks) to be injected into `MemoryStore`.
 - Context-aware Pub/Sub methods on `MemoryStore`: `SubscribeContext`, `PublishContext`, and `UnsubscribeContext` (with `Config.PubSubTimeout` now enforced by non-context helpers).
@@ -71,5 +73,6 @@ Initial tagged release of **MemoryStore**, built for **Go 1.27+**.
 - Pluggable `PubSubClient` interface with In-Memory wildcard broker and Google Cloud Pub/Sub backend.
 - Race-tested unit test suite, Makefile automation, and GitHub Actions CI.
 
-[Unreleased]: https://github.com/BryceWayne/MemoryStore/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/BryceWayne/MemoryStore/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/BryceWayne/MemoryStore/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/BryceWayne/MemoryStore/releases/tag/v0.1.0
