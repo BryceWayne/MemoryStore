@@ -59,7 +59,7 @@ jobs:
           (cd pubsub/gcp && go test -count=1 -race -cover -v ./...)
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }} # optional, but required for private repos
           file: ./coverage.out
