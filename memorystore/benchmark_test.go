@@ -2,8 +2,6 @@ package memorystore
 
 import (
 	"fmt"
-	"io"
-	"log"
 	"testing"
 	"time"
 )
@@ -56,10 +54,7 @@ func newBenchComplexStruct() benchComplexStruct {
 
 func newSilentBenchStore(b *testing.B) *MemoryStore {
 	b.Helper()
-	prev := log.Writer()
-	log.SetOutput(io.Discard)
 	ms := NewMemoryStore()
-	log.SetOutput(prev)
 	b.Cleanup(func() {
 		_ = ms.Stop()
 	})
@@ -243,6 +238,28 @@ func BenchmarkMemoryStore_GetMulti(b *testing.B) {
 		res := ms.GetMulti(keys)
 		if len(res) != 100 {
 			b.Fatalf("expected 100 items, got %d", len(res))
+		}
+	}
+}
+
+func BenchmarkMemoryStore_PubSub_ExactManyTopics(b *testing.B) {
+	ms := newSilentBenchStore(b)
+	for i := range 100 {
+		ch, err := ms.Subscribe(fmt.Sprintf("orders:region-%d", i))
+		if err != nil {
+			b.Fatal(err)
+		}
+		go func(c <-chan []byte) {
+			for range c {
+			}
+		}(ch)
+	}
+	msg := []byte("order-created")
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := ms.Publish("orders:region-42", msg); err != nil {
+			b.Fatal(err)
 		}
 	}
 }

@@ -1,6 +1,3 @@
-# This workflow will build a golang project
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-go
-
 name: Go
 
 on:
@@ -11,52 +8,60 @@ on:
   workflow_dispatch:
 
 jobs:
-
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.27'
-        cache: true
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.27'
+          cache: true
 
-    - name: Get dependencies
-      run: |
-        go mod download
-        go mod verify
+      - name: Get and verify dependencies
+        run: |
+          go mod download
+          go mod verify
+          (cd pubsub/gcp && go mod download && go mod verify)
 
-    - name: Verify formatting
-      run: |
-        gofmt -l . > gofmt_diff.txt
-        if [ -s gofmt_diff.txt ]; then
-          echo "Run 'go fmt ./...' to fix formatting"
-          cat gofmt_diff.txt
-          exit 1
-        fi
+      - name: Verify formatting
+        run: |
+          gofmt -l . > gofmt_diff.txt
+          if [ -s gofmt_diff.txt ]; then
+            echo "Run 'make fmt' to fix formatting"
+            cat gofmt_diff.txt
+            exit 1
+          fi
 
-    - name: Vet
-      run: go vet ./...
+      - name: Vet
+        run: |
+          go vet ./...
+          (cd pubsub/gcp && go vet ./...)
 
-    - name: Install golangci-lint
-      run: |
-        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.15.0
+      - name: Install golangci-lint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.15.0
 
-    - name: Run golangci-lint
-      run: golangci-lint run ./...
+      - name: Run golangci-lint
+        run: |
+          golangci-lint run ./...
+          (cd pubsub/gcp && golangci-lint run --config ../../.golangci.yml ./...)
 
-    - name: Build
-      run: go build -v ./...
+      - name: Build
+        run: |
+          go build -v ./...
+          (cd pubsub/gcp && go build -v ./...)
 
-    - name: Test with Race Detector and Coverage
-      run: go test -race -coverprofile=coverage.out -covermode=atomic -v ./...
+      - name: Test with Race Detector and Coverage
+        run: |
+          go test -count=1 -race -coverprofile=coverage.out -covermode=atomic -v ./...
+          (cd pubsub/gcp && go test -count=1 -race -cover -v ./...)
 
-    - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v3
-      with:
-        token: ${{ secrets.CODECOV_TOKEN }} # optional, but required for private repos
-        file: ./coverage.out
-        flags: unittests
-        name: codecov-umbrella
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }} # optional, but required for private repos
+          file: ./coverage.out
+          flags: unittests
+          name: codecov-umbrella

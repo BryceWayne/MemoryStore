@@ -6,7 +6,7 @@
 [![Go Version](https://img.shields.io/badge/Go-1.27%2B-00ADD8?logo=go)](https://go.dev/doc/go1.27)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**MemoryStore** is a high-performance, thread-safe, sharded in-memory key-value cache and Pub/Sub library for Go. Built for **Go 1.27+**, it combines cache-line padded sharded storage, automatic TTL expiration, standard-library **`encoding/json/v2`** serialization, low-allocation batch operations, built-in metrics, and a pluggable Publish/Subscribe layer (In-Memory and Google Cloud Pub/Sub).
+**MemoryStore** is a **zero-dependency**, high-performance, thread-safe, sharded in-memory key-value cache and pluggable Pub/Sub library for Go. Built for **Go 1.27+**, it combines cache-line padded sharded storage with per-shard atomic metrics, automatic TTL expiration, standard-library **`encoding/json/v2`** serialization, stack-optimized batch operations, and a provider-agnostic Publish/Subscribe interface.
 
 ---
 
@@ -20,9 +20,10 @@
   - [JSON Serialization (`encoding/json/v2`)](#json-serialization-encodingjsonv2)
   - [Batch Operations](#batch-operations)
   - [Metrics & Monitoring](#metrics--monitoring)
-  - [Publish / Subscribe](#publish--subscribe)
-  - [Expiration & Graceful Shutdown](#expiration--graceful-shutdown)
+  - [Publish / Subscribe (Pluggable Backends)](#publish--subscribe-pluggable-backends)
+  - [Configuration, Logging & Lifecycle](#configuration-logging--lifecycle)
 - [API Overview](#api-overview)
+- [Repository Layout](#repository-layout)
 - [Architecture](#architecture)
 - [Performance & Benchmarks](#performance--benchmarks)
 - [Development & Testing](#development--testing)
@@ -35,13 +36,14 @@
 
 ## Features
 
-- **Sharded Concurrency:** 256 inline, cache-line padded shards with per-shard `sync.RWMutex` locking and zero-allocation hardware-accelerated hashing (`hash/maphash`).
-- **Automatic Expiration:** Pointer-free monotonic TTL timestamps with lazy expiration checks and periodic background cleanup.
-- **Standard Library JSON v2:** Built on Go 1.27's `encoding/json/v2` with zero external JSON dependencies, strict RFC 8259 defaults, and optional `json.Options` customization (`SetJSONWithOptions` / `GetJSONWithOptions`).
-- **Low-Allocation Batch Operations:** `SetMulti` and `GetMulti` group keys per shard in a single flat pass to minimize lock acquisitions and heap allocations.
-- **Pluggable Pub/Sub:** Provider-agnostic `PubSubClient` interface supporting a zero-allocation wildcard In-Memory broker by default and Google Cloud Pub/Sub out of the box.
-- **Built-In Metrics:** Thread-safe atomic counters (`Items`, `Hits`, `Misses`, `Evictions`).
-- **Clean Lifecycle Management:** Idempotent `Stop()` with goroutine cleanup verified against Go 1.27's `goroutineleak` profiler and `-race` detector.
+- **Zero External Dependencies (Core):** The root `github.com/BryceWayne/MemoryStore` module uses **only the Go 1.27 standard library**. Optional broker adapters (like Google Cloud Pub/Sub) live in standalone sub-modules.
+- **High-Throughput Sharded Concurrency:** 256 inline, 64-byte cache-line padded shards with per-shard `sync.RWMutex` locks, per-shard `atomic.Int64` metrics (eliminating cross-core cache-line bouncing), and zero-allocation `hash/maphash` routing.
+- **Automatic Expiration:** Pointer-free monotonic TTL timestamps with lazy expiration checks and configurable background cleanup.
+- **Standard Library JSON v2:** Built on Go 1.27's `encoding/json/v2` with strict RFC 8259 defaults and optional `json.Options` customization (`SetJSONWithOptions` / `GetJSONWithOptions`).
+- **Zero-Allocation Batch Writes:** `SetMulti` and `GetMulti` group keys per shard with stack-allocated scratch buffers (for batches up to 128 keys) to minimize lock acquisitions and eliminate heap churn.
+- **Pluggable, Context-Aware Pub/Sub:** Provider-agnostic `PubSubClient` interface (using only stdlib types) so any broker — In-Memory (O(1) exact routing + zero-alloc wildcard matching), Google Cloud Pub/Sub v2 (`pubsub/gcp`), Redis, NATS, Kafka, or custom mocks — plugs straight into `Config.PubSub`.
+- **Library-Friendly Logging:** Silent by default (`slog.DiscardHandler`); opt in by passing any `*slog.Logger` via `Config.Logger`.
+- **Verified Quality:** 99%+ statement coverage on core `memorystore`, tested with `-race` and Go 1.27's `goroutineleak` profiler.
 
 ---
 
@@ -53,8 +55,16 @@
 
 ## Installation
 
+Install the zero-dependency core module:
+
 ```bash
 go get github.com/BryceWayne/MemoryStore/memorystore
+```
+
+*(Optional)* Install the standalone Google Cloud Pub/Sub v2 adapter:
+
+```bash
+go get github.com/BryceWayne/MemoryStore/pubsub/gcp
 ```
 
 ---
@@ -89,6 +99,8 @@ func main() {
 	}
 }
 ```
+
+See [examples/basic/main.go](examples/basic/main.go) for a complete runnable program (`make run-example`).
 
 ---
 
@@ -127,7 +139,7 @@ if exists {
 
 #### Custom Options & Legacy `encoding/json` v1 Compatibility
 
-Use `SetJSONWithOptions` and `GetJSONWithOptions` to pass any `encoding/json/v2` or `encoding/json/jsontext` options — including `encoding/json.DefaultOptionsV1()` if you need legacy v1 behavior:
+Use `SetJSONWithOptions` and `GetJSONWithOptions` to pass any `encoding/json/v2` or `encoding/json/jsontext` options — including `encoding/json.DefaultOptionsV1()` when legacy v1 semantics are required:
 
 ```go
 import (
@@ -141,7 +153,7 @@ err := store.SetJSONWithOptions("cfg", cfgMap, time.Hour, json.Deterministic(tru
 // Reject unknown JSON fields on unmarshal
 exists, err := store.GetJSONWithOptions("cfg", &cfg, json.RejectUnknownMembers(true))
 
-// Opt in to legacy encoding/json v1 semantics when needed
+// Opt in to legacy encoding/json v1 semantics
 err = store.SetJSONWithOptions("legacy", payload, time.Hour, jsonv1.DefaultOptionsV1())
 ```
 
@@ -163,7 +175,7 @@ results := store.GetMulti([]string{"key1", "key2"})
 
 ### Metrics & Monitoring
 
-Inspect live store statistics at any time:
+Inspect live, per-shard aggregated statistics at any time:
 
 ```go
 metrics := store.GetMetrics()
@@ -173,11 +185,11 @@ log.Printf(
 )
 ```
 
-### Publish / Subscribe
+### Publish / Subscribe (Pluggable Backends)
 
-#### In-Memory Pub/Sub (Default)
+#### Built-In In-Memory Broker (Default)
 
-Supports exact topics as well as `:`-delimited wildcard patterns (for example, `user:*` or `orders:*:created`):
+Provides **O(1)** lookup for exact topics and zero-allocation `:`-delimited wildcard matching (`user:*`, `orders:*:created`):
 
 ```go
 store := memorystore.NewMemoryStore()
@@ -201,30 +213,61 @@ if err := store.Publish("user:123", []byte("logged in")); err != nil {
 _ = store.Unsubscribe("user:*")
 ```
 
-#### Google Cloud Pub/Sub
+Context-aware variants (`SubscribeContext`, `PublishContext`, `UnsubscribeContext`) are also available for per-call cancellation and deadlines.
 
-Configure GCP Pub/Sub explicitly via `Config`:
+#### Plugging In Any External Broker (`PubSubClient`)
+
+Any type implementing the four standard-library methods below automatically satisfies `memorystore.PubSubClient` without even importing `memorystore`:
 
 ```go
+type PubSubClient interface {
+	Subscribe(ctx context.Context, topic string) (<-chan []byte, error)
+	Publish(ctx context.Context, topic string, message []byte) error
+	Unsubscribe(ctx context.Context, topic string) error
+	Close() error
+}
+```
+
+#### Google Cloud Pub/Sub (`pubsub/gcp` sub-module)
+
+```go
+import (
+	"context"
+	"log"
+	"time"
+
+	"github.com/BryceWayne/MemoryStore/memorystore"
+	"github.com/BryceWayne/MemoryStore/pubsub/gcp"
+)
+
+ctx := context.Background()
+gcpClient, err := gcp.NewClient(ctx, "my-gcp-project-id")
+if err != nil {
+	log.Fatal(err)
+}
+
 store := memorystore.NewMemoryStoreWithConfig(memorystore.Config{
-	GCPProjectID: "my-gcp-project-id",
+	PubSub:        gcpClient,
+	PubSubTimeout: 5 * time.Second,
 })
 defer store.Stop()
 ```
 
-Or set the `GOOGLE_CLOUD_PROJECT` environment variable before calling `memorystore.NewMemoryStore()`:
+### Configuration, Logging & Lifecycle
 
-```bash
-export GOOGLE_CLOUD_PROJECT=my-gcp-project-id
+```go
+logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+store := memorystore.NewMemoryStoreWithConfig(memorystore.Config{
+	PubSub:          customBroker,        // Defaults to InMemoryPubSub
+	PubSubTimeout:   5 * time.Second,     // Default timeout for non-context Pub/Sub helpers
+	CleanupInterval: 30 * time.Second,    // Background expiration sweep interval (default 1m)
+	Logger:          logger,              // Defaults to slog.DiscardHandler (silent)
+})
+defer store.Stop()
 ```
 
-If GCP Pub/Sub initialization fails (for example, missing credentials in local development), MemoryStore logs the error and gracefully falls back to the In-Memory broker.
-
-### Expiration & Graceful Shutdown
-
 - Items with `duration <= 0` expire immediately.
-- Expired entries are filtered out on `Get` / `GetMulti` and periodically evicted by a background cleanup worker (every 1 minute).
-- Always call `store.Stop()` when shutting down to stop background workers, close Pub/Sub subscriptions, and release memory. Multiple calls to `Stop()` are safe and idempotent.
+- Always call `store.Stop()` when shutting down to stop background workers, close the `PubSubClient`, and release memory. Multiple calls to `Stop()` are safe and idempotent.
 
 ---
 
@@ -234,8 +277,8 @@ Full API documentation is available on [pkg.go.dev](https://pkg.go.dev/github.co
 
 | Method / Type | Description |
 | :--- | :--- |
-| `NewMemoryStore() *MemoryStore` | Creates a store (auto-detects `GOOGLE_CLOUD_PROJECT` for GCP Pub/Sub) |
-| `NewMemoryStoreWithConfig(Config) *MemoryStore` | Creates a store with explicit configuration |
+| `NewMemoryStore() *MemoryStore` | Creates a store with default settings (In-Memory Pub/Sub, silent logger) |
+| `NewMemoryStoreWithConfig(Config) *MemoryStore` | Creates a store with custom `PubSub`, `PubSubTimeout`, `CleanupInterval`, `Logger` |
 | `Set(key string, value []byte, duration time.Duration) error` | Stores raw bytes with a TTL |
 | `Get(key string) ([]byte, bool)` | Retrieves raw bytes if present and unexpired |
 | `Delete(key string)` | Removes a key |
@@ -246,11 +289,25 @@ Full API documentation is available on [pkg.go.dev](https://pkg.go.dev/github.co
 | `SetMulti(items map[string][]byte, duration time.Duration) error` | Batch-sets multiple keys grouped by shard |
 | `GetMulti(keys []string) map[string][]byte` | Batch-gets multiple keys grouped by shard |
 | `GetMetrics() StoreMetrics` | Returns `Items`, `Hits`, `Misses`, and `Evictions` |
-| `Subscribe(topic string) (<-chan []byte, error)` | Subscribes to a topic or wildcard pattern |
-| `Publish(topic string, message []byte) error` | Publishes a message to matching subscribers |
-| `Unsubscribe(topic string) error` | Cancels subscriptions for a topic |
-| `SubscriberCount(pattern string) int` | Returns active subscriber count (In-Memory Pub/Sub) |
+| `Subscribe` / `SubscribeContext` | Subscribes to a topic or pattern |
+| `Publish` / `PublishContext` | Publishes a message to matching subscribers |
+| `Unsubscribe` / `UnsubscribeContext` | Cancels subscriptions for a topic |
+| `SubscriberCount(pattern string) int` | Returns active subscriber count when backend implements `SubscriberCounter` |
+| `NewInMemoryPubSub() *InMemoryPubSub` | Instantiates the built-in in-memory Pub/Sub broker directly |
 | `Stop() error` / `IsStopped() bool` | Gracefully stops the store and checks lifecycle state |
+
+---
+
+## Repository Layout
+
+```text
+.
+├── memorystore/        # Core zero-dependency cache & PubSubClient interface
+├── pubsub/gcp/         # Standalone Go module for Google Cloud Pub/Sub (v2)
+├── examples/basic/     # Runnable usage example
+├── Makefile            # Multi-module build, test, lint, and benchmark targets
+└── .github/            # CI, release workflow, Dependabot, and issue/PR templates
+```
 
 ---
 
@@ -262,13 +319,12 @@ graph TD
         User[User Application]
     end
 
-    subgraph MemoryStore System
+    subgraph "MemoryStore Core (Zero External Dependencies)"
         API[MemoryStore API]
 
         subgraph "Storage Engine"
             Hash["hash/maphash Shard Router"]
-            Shards["256 Cache-Line Padded Shards"]
-            Metrics["Atomic Metrics Collector"]
+            Shards["256 Cache-Line Padded Shards (with Per-Shard Atomic Metrics)"]
         end
 
         subgraph "Serialization"
@@ -276,14 +332,18 @@ graph TD
         end
 
         subgraph "Background Services"
-            Cleaner[Expiration Cleanup Worker]
+            Cleaner[Configurable Expiration Sweeper]
         end
 
-        subgraph "Pub/Sub System"
-            PS_Interface[PubSubClient Interface]
-            PS_Mem["In-Memory Broker (Zero-Alloc Matcher)"]
-            PS_GCP[Google Cloud Pub/Sub]
+        subgraph "Pub/Sub Abstraction"
+            PS_Interface["PubSubClient Interface (stdlib types only)"]
+            PS_Mem["InMemoryPubSub (O(1) Exact + Zero-Alloc Wildcards)"]
         end
+    end
+
+    subgraph "Optional Pluggable Adapters"
+        PS_GCP["pubsub/gcp (Cloud Pub/Sub v2)"]
+        PS_Custom["Custom Adapters (Redis, NATS, Kafka, ...)"]
     end
 
     User -->|Set / Get / Batch| API
@@ -292,62 +352,44 @@ graph TD
     User -->|Subscribe / Publish| API
 
     API --> Hash --> Shards
-    API -->|Record| Metrics
     API --> PS_Interface
 
     Cleaner -->|Periodic Per-Shard Sweep| Shards
 
     PS_Interface -->|Default| PS_Mem
-    PS_Interface -->|Configured| PS_GCP
-```
-
-### Pub/Sub Data Flow
-
-```mermaid
-sequenceDiagram
-    participant P as Publisher
-    participant MS as MemoryStore
-    participant S as Subscriber
-
-    S->>MS: Subscribe("topic:*")
-    activate MS
-    MS-->>S: Returns <-chan []byte
-    deactivate MS
-
-    P->>MS: Publish("topic:123", payload)
-    activate MS
-    MS->>S: Delivers payload to matching channel
-    deactivate MS
+    PS_Interface -->|Config.PubSub| PS_GCP
+    PS_Interface -->|Config.PubSub| PS_Custom
 ```
 
 ---
 
 ## Performance & Benchmarks
 
-MemoryStore is engineered for low latency and minimal GC pressure on Go 1.27+:
+MemoryStore is engineered for low latency, high multi-core scalability, and minimal GC pressure on Go 1.27+:
 
 - **Go 1.27 runtime advantages:** Size-specialized small allocations (<80 B), default Green Tea GC, stack-allocated slice backing stores, and container-aware `GOMAXPROCS`.
 - **Zero-allocation shard hashing:** `hash/maphash.String` with power-of-2 bitmasking.
-- **Reduced false sharing:** 256 inline shards padded to 64-byte cache lines.
+- **Zero cross-core metric contention:** 256 inline 64-byte cache-line padded shards, each owning its own `sync.RWMutex` and `atomic.Int64` hit/miss/eviction counters.
 - **Pointer-free expiration:** Monotonic `int64` nanosecond offsets shrink each cache entry from 48 B to 32 B and cut GC pointer scanning.
-- **Flat batch grouping:** Intrusive-index shard bucketing eliminates per-shard map allocations in `SetMulti` / `GetMulti`.
-- **Zero-allocation topic matching:** `strings.Cut` loop in `InMemoryPubSub`.
+- **Stack-allocated batch grouping:** Intrusive-index shard bucketing with stack scratch buffers achieves **0 B/op, 0 allocs/op** on `SetMulti` batches up to 128 keys.
+- **O(1) exact-topic Pub/Sub + zero-alloc wildcards:** Separate exact and wildcard subscription maps in `InMemoryPubSub`.
 
 Representative `benchstat` results (`go1.27.4`, `linux/amd64`, Intel Core i9-12900K, `n=6`, `-benchtime=500ms`):
 
 | Benchmark | Time / op | Bytes / op | Allocs / op |
 | :--- | ---: | ---: | ---: |
-| `BenchmarkMemoryStore_Set` | 49.4 ns | 0 B | 0 |
-| `BenchmarkMemoryStore_Get` | 42.2 ns | 0 B | 0 |
-| `BenchmarkMemoryStore_GetParallel` | 27.0 ns | 0 B | 0 |
-| `BenchmarkMemoryStore_SetGetParallel` | 33.0 ns | 0 B | 0 |
-| `BenchmarkMemoryStore_SetMulti` (100 keys) | 4.02 µs | 4,864 B | 1 |
-| `BenchmarkMemoryStore_GetMulti` (100 keys) | 3.62 µs | 6,360 B | 5 |
-| `BenchmarkMemoryStore_SetJSON_Small` | 210.8 ns | 48 B | 1 |
-| `BenchmarkMemoryStore_GetJSON_Small` | 242.4 ns | 0 B | 0 |
-| `BenchmarkMemoryStore_SetJSON_Complex` | 1.67 µs | 512 B | 8 |
-| `BenchmarkMemoryStore_GetJSON_Complex` | 2.29 µs | 976 B | 17 |
-| `BenchmarkMemoryStore_PubSub` | 78.4 ns | 0 B | 0 |
+| `BenchmarkMemoryStore_Set` | 48.6 ns | 0 B | 0 |
+| `BenchmarkMemoryStore_Get` | 40.9 ns | 0 B | 0 |
+| `BenchmarkMemoryStore_GetParallel` | **7.88 ns** | 0 B | 0 |
+| `BenchmarkMemoryStore_SetGetParallel` | 29.3 ns | 0 B | 0 |
+| `BenchmarkMemoryStore_SetMulti` (100 keys) | **3.15 µs** | **0 B** | **0** |
+| `BenchmarkMemoryStore_GetMulti` (100 keys) | **3.13 µs** | 5,464 B | 4 |
+| `BenchmarkMemoryStore_SetJSON_Small` | 207.8 ns | 48 B | 1 |
+| `BenchmarkMemoryStore_GetJSON_Small` | 251.6 ns | **0 B** | **0** |
+| `BenchmarkMemoryStore_SetJSON_Complex` | 1.73 µs | 512 B | 8 |
+| `BenchmarkMemoryStore_GetJSON_Complex` | 2.21 µs | 976 B | 17 |
+| `BenchmarkMemoryStore_PubSub` (wildcard) | 80.7 ns | 0 B | 0 |
+| `BenchmarkMemoryStore_PubSub_ExactManyTopics` (100 topics) | **38.6 ns** | **0 B** | **0** |
 
 Reproduce locally:
 
@@ -364,14 +406,15 @@ go test -run='^$' -bench=. -benchmem -count=6 ./memorystore
 Use the included [Makefile](Makefile):
 
 ```bash
-make all        # Run clean, fmt, vet, lint, test, and build
-make test       # Run tests with -race and coverage
-make bench      # Run benchmarks with memory stats
-make lint       # Run golangci-lint (v2)
-make vet        # Run go vet
-make fmt        # Format code with go fmt
-make coverage   # Generate HTML coverage report
-make help       # List all targets
+make all          # Run clean, fmt, vet, lint, test, and build across all modules
+make test         # Run tests with -race and coverage across all modules
+make bench        # Run benchmarks with memory stats
+make lint         # Run golangci-lint (v2) across all modules
+make vet          # Run go vet across all modules
+make fmt          # Format code with go fmt
+make coverage     # Generate HTML coverage report
+make run-example  # Run examples/basic
+make help         # List all targets
 ```
 
 ---
@@ -381,7 +424,7 @@ make help       # List all targets
 Contributions are welcome and appreciated! Please read our [Contributing Guide](CONTRIBUTING.md) and [Code of Conduct](CODE_OF_CONDUCT.md) before opening an issue or pull request.
 
 - Report bugs via the [Bug Report template](.github/ISSUE_TEMPLATE/bug_report.md).
-- Propose enhancements via the [Feature Request template](.github/ISSUE_TEMPLATE/feature_request.md).
+- Propose enhancements or new `PubSubClient` adapters via the [Feature Request template](.github/ISSUE_TEMPLATE/feature_request.md).
 - Target all pull requests against the `root` branch.
 
 ---
