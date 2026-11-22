@@ -63,7 +63,9 @@ func TestInMemoryPubSub_Closed(t *testing.T) {
 
 func TestInMemoryPubSub_RemoveSubscription(t *testing.T) {
 	ps := newInMemoryPubSub()
-	defer ps.Close()
+	defer func() {
+		_ = ps.Close()
+	}()
 
 	topic := "test"
 	sub1, err := ps.Subscribe(topic)
@@ -141,7 +143,9 @@ func TestInMemoryPubSub_RemoveSubscription_AfterClose(t *testing.T) {
 
 func TestInMemoryPubSub_RemoveSubscription_TopicNotFound(t *testing.T) {
 	ps := newInMemoryPubSub()
-	defer ps.Close()
+	defer func() {
+		_ = ps.Close()
+	}()
 
 	// Try to remove subscription for non-existent topic
 	dummySub := &subscription{topic: "non-existent"}
@@ -150,7 +154,9 @@ func TestInMemoryPubSub_RemoveSubscription_TopicNotFound(t *testing.T) {
 
 func TestInMemoryPubSub_TopicCleaning(t *testing.T) {
 	ps := newInMemoryPubSub()
-	defer ps.Close()
+	defer func() {
+		_ = ps.Close()
+	}()
 
 	topic := "temp-topic"
 	ch, _ := ps.Subscribe(topic)
@@ -177,7 +183,9 @@ func TestInMemoryPubSub_TopicCleaning(t *testing.T) {
 
 func TestInMemoryPubSub_ConcurrentPublishSubscribe(t *testing.T) {
 	ps := newInMemoryPubSub()
-	defer ps.Close()
+	defer func() {
+		_ = ps.Close()
+	}()
 
 	var wg sync.WaitGroup
 	const routines = 20

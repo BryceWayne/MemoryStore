@@ -1,0 +1,25 @@
+# Build artifacts
+/memory_store
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test & coverage artifacts
+*.test
+*.out
+coverage.html
+gofmt_diff.txt
+
+# Benchmark scratch files
+bench*.txt
+
+# Local environment & IDE files
+.env
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

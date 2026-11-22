@@ -1,6 +1,6 @@
 # Makefile for MemoryStore
 
-.PHONY: all build clean test bench lint fmt vet help
+.PHONY: all build clean test bench lint fmt vet coverage help
 
 # Default target
 all: clean fmt vet lint test build
@@ -10,15 +10,22 @@ build:
 	@echo "Building MemoryStore..."
 	go build -o memory_store
 
-# Run tests with race detection
+# Run tests with race detection and coverage
 test:
 	@echo "Running tests..."
-	go test -race -cover ./...
+	go test -count=1 -race -cover ./...
 
-# Run benchmarks
+# Generate HTML coverage report
+coverage:
+	@echo "Generating coverage report..."
+	go test -race -coverprofile=coverage.out -covermode=atomic ./...
+	go tool cover -html=coverage.out -o coverage.html
+	@echo "Coverage report written to coverage.html"
+
+# Run benchmarks with memory allocation stats
 bench:
 	@echo "Running benchmarks..."
-	go test -bench=. ./...
+	go test -run='^$$' -bench=. -benchmem ./...
 
 # Run linter
 lint:
@@ -30,16 +37,16 @@ fmt:
 	@echo "Formatting code..."
 	go fmt ./...
 
-# Vetting code
+# Vet code
 vet:
 	@echo "Vetting code..."
 	go vet ./...
 
-# Clean build artifacts
+# Clean build and coverage artifacts
 clean:
 	@echo "Cleaning up..."
 	go clean
-	rm -f memory_store
+	rm -f memory_store coverage.out coverage.html gofmt_diff.txt
 
 # Show help
 help:
@@ -48,10 +55,11 @@ help:
 	@echo "Targets:"
 	@echo "  all       Run clean, fmt, vet, lint, test, and build"
 	@echo "  build     Build the project"
-	@echo "  test      Run tests with race detector"
-	@echo "  bench     Run benchmarks"
+	@echo "  test      Run tests with race detector and coverage"
+	@echo "  coverage  Generate HTML coverage report (coverage.html)"
+	@echo "  bench     Run benchmarks with memory stats"
 	@echo "  lint      Run linter (golangci-lint)"
 	@echo "  fmt       Format code (go fmt)"
 	@echo "  vet       Vet code (go vet)"
-	@echo "  clean     Remove build artifacts"
+	@echo "  clean     Remove build and test artifacts"
 	@echo "  help      Show this help message"

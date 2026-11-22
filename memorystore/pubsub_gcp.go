@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"sync"
 	"time"
+	"uuid"
 
 	"cloud.google.com/go/pubsub" //nolint:staticcheck
-	"github.com/google/uuid"
 	"google.golang.org/api/option"
 )
 
@@ -68,7 +68,7 @@ func (g *GCPPubSub) Subscribe(topicName string) (<-chan []byte, error) {
 	subID := fmt.Sprintf("memorystore-sub-%s-%s", topicName, uuid.New().String())
 	sub, err := g.client.CreateSubscription(context.Background(), subID, pubsub.SubscriptionConfig{
 		Topic:            topic,
-		ExpirationPolicy: time.Duration(24 * time.Hour), // Auto-delete if unused
+		ExpirationPolicy: 24 * time.Hour, // Auto-delete if unused
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create subscription: %w", err)
@@ -84,9 +84,7 @@ func (g *GCPPubSub) Subscribe(topicName string) (<-chan []byte, error) {
 		cancel: cancel,
 	}
 
-	gcpSub.wg.Add(1)
-	go func() {
-		defer gcpSub.wg.Done()
+	gcpSub.wg.Go(func() {
 		defer close(ch)
 
 		err := sub.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
@@ -103,7 +101,7 @@ func (g *GCPPubSub) Subscribe(topicName string) (<-chan []byte, error) {
 			// For now, we'll just ignore it as per the existing design.
 			_ = err
 		}
-	}()
+	})
 
 	g.subscriptions[topicName] = gcpSub
 	return ch, nil

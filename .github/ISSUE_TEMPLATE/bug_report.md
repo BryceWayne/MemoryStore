@@ -1,36 +1,42 @@
 ---
 name: Bug report
-about: Create a report to help us improve
-title: '[BUG]'
+about: Report a reproducible bug in MemoryStore
+title: '[BUG] '
 labels: 'bug'
 assignees: ''
-
 ---
 
-**Describe the bug**
+## Describe the Bug
+
 A clear and concise description of what the bug is.
 
-**To Reproduce**
+## To Reproduce
+
 Steps to reproduce the behavior:
-1. Initialize store with '...'
-2. Call method '....'
-3. Perform operation '....'
-4. See error
 
-**Expected behavior**
-A clear and concise description of what you expected to happen.
+1. Initialize `MemoryStore` with ...
+2. Call method ...
+3. Observe error / unexpected state
 
-**Code Sample**
-If applicable, add a minimal code sample to help explain your problem.
+## Minimal Reproducible Example
 
 ```go
-// Your code here
+package main
+
+// Paste a minimal Go snippet reproducing the issue.
 ```
 
-**Environment (please complete the following information):**
- - OS: [e.g. Linux, macOS, Windows]
- - Go Version: [e.g. 1.20]
- - MemoryStore Version: [e.g. v1.0.0]
+## Expected Behavior
 
-**Additional context**
-Add any other context about the problem here.
+A clear and concise description of what you expected to happen.
+
+## Environment
+
+- **OS / Arch:** (e.g., `linux/amd64`, `darwin/arm64`)
+- **Go Version:** (output of `go version`, e.g., `go1.27.4`)
+- **MemoryStore Version / Commit:** (e.g., `v1.0.0` or commit SHA)
+- **Pub/Sub Backend:** (In-Memory / Google Cloud Pub/Sub)
+
+## Additional Context
+
+Add logs, stack traces, `-race` output, or `goroutineleak` profile output if applicable.

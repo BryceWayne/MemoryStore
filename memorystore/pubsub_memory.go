@@ -1,4 +1,3 @@
-// memorystore/pubsub_memory.go
 package memorystore
 
 import (
@@ -62,16 +61,12 @@ func (ps *InMemoryPubSub) Subscribe(topic string) (<-chan []byte, error) {
 	// Add subscription to manager
 	ps.subscriptions[topic] = append(ps.subscriptions[topic], sub)
 
-	// Add to wait group for graceful shutdown
-	ps.wg.Add(1)
-
-	// Cleanup goroutine
-	go func() {
-		defer ps.wg.Done()
+	// Cleanup goroutine tracked by WaitGroup for graceful shutdown
+	ps.wg.Go(func() {
 		<-ctx.Done()
 		ps.removeSubscription(topic, sub)
 		close(ch)
-	}()
+	})
 
 	return ch, nil
 }
@@ -185,27 +180,27 @@ func (ps *InMemoryPubSub) removeSubscription(topic string, sub *subscription) {
 	}
 }
 
-// matchesTopic checks if a topic matches a subscription pattern
+// matchesTopic checks if a topic matches a subscription pattern without allocating slices.
 func matchesTopic(topic, pattern string) bool {
-	// If exactly equal, return true
 	if topic == pattern {
 		return true
 	}
 
-	// Split pattern and topic into segments
-	patternParts := strings.Split(pattern, ":")
-	topicParts := strings.Split(topic, ":")
+	for {
+		patternPart, patternRest, patternHasMore := strings.Cut(pattern, ":")
+		topicPart, topicRest, topicHasMore := strings.Cut(topic, ":")
 
-	if len(patternParts) != len(topicParts) {
-		return false
-	}
-
-	// Check each segment
-	for i, patternPart := range patternParts {
-		if patternPart != "*" && patternPart != topicParts[i] {
+		if patternPart != "*" && patternPart != topicPart {
 			return false
 		}
-	}
+		if patternHasMore != topicHasMore {
+			return false
+		}
+		if !patternHasMore {
+			return true
+		}
 
-	return true
+		pattern = patternRest
+		topic = topicRest
+	}
 }

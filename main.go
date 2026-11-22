@@ -7,9 +7,9 @@ import (
 	"os"
 	"sync"
 	"time"
+	"uuid"
 
 	"github.com/BryceWayne/MemoryStore/memorystore"
-	"github.com/google/uuid"
 )
 
 // Person represents a sample data structure.
@@ -17,7 +17,7 @@ type Person struct {
 	Name    string    `json:"name"`
 	Age     int       `json:"age"`
 	UID     string    `json:"uid"`
-	Created time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created,omitzero"`
 }
 
 // demonstrateBasicOperations shows basic Set/Get operations.
