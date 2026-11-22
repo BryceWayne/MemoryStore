@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-22
+
+Initial tagged release of **MemoryStore**, built for **Go 1.27+**.
+
 ### Added
 - `MemoryStore.SetJSONWithOptions` and `MemoryStore.GetJSONWithOptions` exposing Go 1.27 `encoding/json/v2` and `encoding/json/jsontext` options (including `encoding/json.DefaultOptionsV1()` compatibility).
 - Comprehensive benchmark suite in `memorystore/benchmark_test.go` covering single-key, concurrent parallel, JSON (small & complex), batch (`SetMulti`/`GetMulti`), and Pub/Sub workloads.
@@ -44,4 +48,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pluggable `PubSubClient` interface with In-Memory wildcard broker and Google Cloud Pub/Sub backend.
 - Race-tested unit test suite, Makefile automation, and GitHub Actions CI.
 
-[Unreleased]: https://github.com/BryceWayne/MemoryStore/compare/root...HEAD
+[Unreleased]: https://github.com/BryceWayne/MemoryStore/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/BryceWayne/MemoryStore/releases/tag/v0.1.0
