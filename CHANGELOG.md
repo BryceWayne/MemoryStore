@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Standalone `github.com/BryceWayne/MemoryStore/pubsub/azure` sub-module implementing `memorystore.PubSubClient` using Azure Service Bus (`azservicebus` + `azservicebus/admin`) with Managed Identity (`azcore.TokenCredential`) and connection string auth, ephemeral auto-managed or pre-provisioned RBAC subscription modes, PeekLock / ReceiveAndDelete support, and cached senders.
+- Custom branded SVG architecture diagram (`docs/images/architecture.svg`) in `README.md`.
+
 ## [0.2.0] - 2026-11-22
 
 ### Added

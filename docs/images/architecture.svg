@@ -157,13 +157,13 @@
   <text x="50" y="432" class="mono muted" font-size="9.5">exactSubs: O(1) lookup</text>
   <text x="50" y="448" class="mono muted" font-size="9.5">wildcardSubs: 0-alloc Cut</text>
 
-  <!-- Standalone: pubsub/gcp -->
+  <!-- Standalone Cloud Sub-Modules -->
   <rect x="256" y="398" width="194" height="62" rx="7" class="subcard"/>
-  <text x="266" y="414" class="mono" font-size="11" font-weight="700" fill="#38BDF8">pubsub/gcp</text>
-  <rect x="378" y="403" width="62" height="15" rx="4" fill="#0C4A6E"/>
-  <text x="409" y="411" class="mono" font-size="8.5" font-weight="600" fill="#7DD3FC" text-anchor="middle" dominant-baseline="central">SUB-MOD</text>
-  <text x="266" y="432" class="mono muted" font-size="9.5">cloud.google.com/go/pubsub/v2</text>
-  <text x="266" y="448" class="mono muted" font-size="9.5">cached publishers • auto-TTL</text>
+  <text x="266" y="414" class="mono" font-size="10.5" font-weight="700" fill="#38BDF8">pubsub/gcp &amp; azure</text>
+  <rect x="384" y="403" width="56" height="15" rx="4" fill="#0C4A6E"/>
+  <text x="412" y="411" class="mono" font-size="8.2" font-weight="600" fill="#7DD3FC" text-anchor="middle" dominant-baseline="central">SUB-MOD</text>
+  <text x="266" y="432" class="mono muted" font-size="9.5">GCP Pub/Sub v2 • Service Bus</text>
+  <text x="266" y="448" class="mono muted" font-size="9.5">isolated go.mod • auto-TTL</text>
 
   <!-- Custom Adapters -->
   <rect x="460" y="398" width="176" height="62" rx="7" fill="#0F172A" stroke="#475569" stroke-width="1.15" stroke-dasharray="4 3"/>
