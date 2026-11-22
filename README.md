@@ -61,10 +61,14 @@ Install the zero-dependency core module:
 go get github.com/BryceWayne/MemoryStore/memorystore
 ```
 
-*(Optional)* Install the standalone Google Cloud Pub/Sub v2 adapter:
+*(Optional)* Install a standalone cloud Pub/Sub adapter:
 
 ```bash
+# Google Cloud Pub/Sub (v2)
 go get github.com/BryceWayne/MemoryStore/pubsub/gcp
+
+# Azure Service Bus
+go get github.com/BryceWayne/MemoryStore/pubsub/azure
 ```
 
 ---
@@ -253,6 +257,44 @@ store := memorystore.NewMemoryStoreWithConfig(memorystore.Config{
 defer store.Stop()
 ```
 
+#### Azure Service Bus (`pubsub/azure` sub-module)
+
+Requires an Azure Service Bus **Standard** or **Premium** namespace (Topics & Subscriptions). Supports both Managed Identity / Entra ID (`azcore.TokenCredential`) and SAS connection strings, as well as ephemeral auto-managed or pre-provisioned least-privilege subscriptions:
+
+```go
+import (
+	"log"
+	"time"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"github.com/BryceWayne/MemoryStore/memorystore"
+	"github.com/BryceWayne/MemoryStore/pubsub/azure"
+)
+
+cred, err := azidentity.NewDefaultAzureCredential(nil)
+if err != nil {
+	log.Fatal(err)
+}
+
+// Ephemeral auto-managed subscription (default, AutoDeleteOnIdle = 24h)
+azureClient, err := azure.NewClient("my-ns.servicebus.windows.net", cred)
+if err != nil {
+	log.Fatal(err)
+}
+
+// Or for least-privilege RBAC (Data Sender/Receiver without admin permissions):
+// azureClient, err := azure.NewClient(
+//     "my-ns.servicebus.windows.net", cred,
+//     azure.WithSubscriptionName("my-preprovisioned-sub"),
+// )
+
+store := memorystore.NewMemoryStoreWithConfig(memorystore.Config{
+	PubSub:        azureClient,
+	PubSubTimeout: 5 * time.Second,
+})
+defer store.Stop()
+```
+
 ### Configuration, Logging & Lifecycle
 
 ```go
@@ -304,6 +346,7 @@ Full API documentation is available on [pkg.go.dev](https://pkg.go.dev/github.co
 .
 ├── memorystore/        # Core zero-dependency cache & PubSubClient interface
 ├── pubsub/gcp/         # Standalone Go module for Google Cloud Pub/Sub (v2)
+├── pubsub/azure/       # Standalone Go module for Azure Service Bus
 ├── docs/images/        # Architecture diagrams
 ├── examples/basic/     # Runnable usage example
 ├── Makefile            # Multi-module build, test, lint, and benchmark targets

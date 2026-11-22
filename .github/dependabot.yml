@@ -18,6 +18,15 @@ updates:
       - "dependencies"
       - "go"
 
+  - package-ecosystem: "gomod"
+    directory: "/pubsub/azure"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "go"
+
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

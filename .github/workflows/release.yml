@@ -28,6 +28,7 @@ jobs:
           go mod download
           go mod verify
           (cd pubsub/gcp && go mod download && go mod verify)
+          (cd pubsub/azure && go mod download && go mod verify)
 
       - name: Verify formatting
         run: |
@@ -42,6 +43,7 @@ jobs:
         run: |
           go vet ./...
           (cd pubsub/gcp && go vet ./...)
+          (cd pubsub/azure && go vet ./...)
 
       - name: Install golangci-lint
         run: |
@@ -51,16 +53,19 @@ jobs:
         run: |
           golangci-lint run ./...
           (cd pubsub/gcp && golangci-lint run --config ../../.golangci.yml ./...)
+          (cd pubsub/azure && golangci-lint run --config ../../.golangci.yml ./...)
 
       - name: Test with race detector
         run: |
           go test -count=1 -race -cover ./...
           (cd pubsub/gcp && go test -count=1 -race -cover ./...)
+          (cd pubsub/azure && go test -count=1 -race -cover ./...)
 
       - name: Build
         run: |
           go build -v ./...
           (cd pubsub/gcp && go build -v ./...)
+          (cd pubsub/azure && go build -v ./...)
 
       - name: Create GitHub Release
         env:
