@@ -1,6 +1,6 @@
 # Makefile for MemoryStore
 
-.PHONY: all build clean test bench lint fmt vet coverage run-example help
+.PHONY: all build clean test bench bench-compare lint fmt vet coverage run-example help
 
 # Default target
 all: clean fmt vet lint test build
@@ -34,6 +34,11 @@ coverage:
 bench:
 	@echo "Running benchmarks..."
 	go test -run='^$$' -bench=. -benchmem ./memorystore
+
+# Run head-to-head comparison benchmarks against peer Go caches
+bench-compare:
+	@echo "Running head-to-head comparison benchmarks..."
+	cd benchmarks && go test -run='^$$' -bench=. -benchmem -benchtime=400ms -count=5 .
 
 # Run linter across all modules
 lint:

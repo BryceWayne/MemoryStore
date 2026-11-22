@@ -56,6 +56,7 @@ jobs:
           go build -v ./...
           (cd pubsub/gcp && go build -v ./...)
           (cd pubsub/azure && go build -v ./...)
+          (cd benchmarks && go test -c -o /dev/null .)
 
       - name: Test with Race Detector and Coverage
         run: |

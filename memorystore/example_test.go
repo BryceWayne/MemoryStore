@@ -1,6 +1,7 @@
 package memorystore_test
 
 import (
+	"context"
 	json "encoding/json/v2"
 	"fmt"
 	"time"
@@ -102,4 +103,41 @@ func ExampleMemoryStore_Subscribe() {
 	fmt.Println(string(msg))
 	// Output:
 	// user-42
+}
+
+func ExampleMemoryStore_GetJSONAs() {
+	store := memorystore.NewMemoryStore()
+	defer func() { _ = store.Stop() }()
+
+	type User struct {
+		Name string `json:"name"`
+	}
+
+	_ = store.SetJSON("user:42", &User{Name: "Grace"}, time.Minute)
+
+	user, ok, err := store.GetJSONAs[User]("user:42")
+	if err == nil && ok {
+		fmt.Println(user.Name)
+	}
+	// Output:
+	// Grace
+}
+
+func ExampleMemoryStore_GetOrLoadJSON() {
+	store := memorystore.NewMemoryStore()
+	defer func() { _ = store.Stop() }()
+
+	type Product struct {
+		SKU   string `json:"sku"`
+		Price int    `json:"price"`
+	}
+
+	p, err := store.GetOrLoadJSON[Product](context.Background(), "sku:1", time.Minute, func(_ context.Context) (Product, error) {
+		return Product{SKU: "sku:1", Price: 1999}, nil
+	})
+	if err == nil {
+		fmt.Printf("%s=$%d\n", p.SKU, p.Price)
+	}
+	// Output:
+	// sku:1=$1999
 }

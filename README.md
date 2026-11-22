@@ -36,14 +36,16 @@
 
 ## Features
 
-- **Zero External Dependencies (Core):** The root `github.com/BryceWayne/MemoryStore` module uses **only the Go 1.27 standard library**. Optional broker adapters (like Google Cloud Pub/Sub) live in standalone sub-modules.
-- **High-Throughput Sharded Concurrency:** 256 inline, 64-byte cache-line padded shards with per-shard `sync.RWMutex` locks, per-shard `atomic.Int64` metrics (eliminating cross-core cache-line bouncing), and zero-allocation `hash/maphash` routing.
-- **Automatic Expiration:** Pointer-free monotonic TTL timestamps with lazy expiration checks and configurable background cleanup.
+- **Zero External Dependencies (Core):** The root `github.com/BryceWayne/MemoryStore` module uses **only the Go 1.27 standard library**. Optional broker adapters (`pubsub/gcp`, `pubsub/azure`) live in standalone sub-modules.
+- **High-Throughput Sharded Concurrency:** 256 inline, 64-byte cache-line aligned shards with per-shard `sync.RWMutex` locks, per-shard `atomic.Int64` metrics, and zero-allocation `hash/maphash` routing (`8.2 ns/op` 12-core parallel reads, `#1` single-threaded writes).
+- **Distributed Cache Invalidation Backplane:** Opt in via `Config.InvalidationTopic` to keep local RAM caches coherent across pods over GCP Pub/Sub, Azure Service Bus, Redis, NATS, or any `PubSubClient` — with automatic per-instance UUID echo suppression.
+- **Go 1.27 Generic Methods & Stampede Protection:** Typed `GetJSONAs[T]` and singleflight-protected `GetOrLoad` / `GetOrLoadJSON[T]` coalesce concurrent cache misses into a single upstream load.
+- **Bounded Capacity & Eviction Callbacks:** Optional `Config.MaxItems`, `Config.MaxBytes` (volatile-TTL sampled eviction with zero overhead on unbounded caches), and lock-free `Config.OnEvict` callbacks.
 - **Standard Library JSON v2:** Built on Go 1.27's `encoding/json/v2` with strict RFC 8259 defaults and optional `json.Options` customization (`SetJSONWithOptions` / `GetJSONWithOptions`).
-- **Zero-Allocation Batch Writes:** `SetMulti` and `GetMulti` group keys per shard with stack-allocated scratch buffers (for batches up to 128 keys) to minimize lock acquisitions and eliminate heap churn.
-- **Pluggable, Context-Aware Pub/Sub:** Provider-agnostic `PubSubClient` interface (using only stdlib types) so any broker — In-Memory (O(1) exact routing + zero-alloc wildcard matching), Google Cloud Pub/Sub v2 (`pubsub/gcp`), Redis, NATS, Kafka, or custom mocks — plugs straight into `Config.PubSub`.
-- **Library-Friendly Logging:** Silent by default (`slog.DiscardHandler`); opt in by passing any `*slog.Logger` via `Config.Logger`.
-- **Verified Quality:** 99%+ statement coverage on core `memorystore`, tested with `-race` and Go 1.27's `goroutineleak` profiler.
+- **Zero-Allocation Batch Writes:** `SetMulti` and `GetMulti` group keys per shard with stack-allocated scratch buffers (for batches up to 128 keys).
+- **Pluggable, Context-Aware Pub/Sub:** Provider-agnostic `PubSubClient` interface (using only stdlib types) supporting In-Memory (O(1) exact routing + zero-alloc wildcard matching), Google Cloud Pub/Sub v2 (`pubsub/gcp`), Azure Service Bus (`pubsub/azure`), or custom brokers.
+- **Library-Friendly Logging:** Silent by default (`slog.DiscardHandler`); opt in via `Config.Logger`.
+- **Verified Quality:** Tested under `-race` and Go 1.27's `goroutineleak` profiler.
 
 ---
 
@@ -159,6 +161,54 @@ exists, err := store.GetJSONWithOptions("cfg", &cfg, json.RejectUnknownMembers(t
 
 // Opt in to legacy encoding/json v1 semantics
 err = store.SetJSONWithOptions("legacy", payload, time.Hour, jsonv1.DefaultOptionsV1())
+```
+
+### Go 1.27 Generic Methods & Stampede Protection (`GetOrLoad`)
+
+Use Go 1.27 generic methods for ergonomic typed reads and singleflight-protected cache population (coalescing concurrent misses for the same key into a single upstream load):
+
+```go
+// Typed JSON read (Go 1.27 generic method)
+user, ok, err := store.GetJSONAs[User]("user:123")
+
+// Singleflight-protected typed JSON load (coalesces concurrent misses)
+user, err = store.GetOrLoadJSON[User](ctx, "user:123", time.Hour, func(ctx context.Context) (User, error) {
+	return db.FetchUser(ctx, "123")
+})
+
+// Raw-byte singleflight load
+raw, err := store.GetOrLoad(ctx, "report:daily", 10*time.Minute, func(ctx context.Context) ([]byte, error) {
+	return generateReport(ctx)
+})
+```
+
+### Distributed Cache Invalidation (Multi-Pod Coherency)
+
+Keep local RAM reads (~8 ns) coherent across multiple application pods over any `PubSubClient` (`pubsub/gcp`, `pubsub/azure`, Redis, NATS, etc.) without a central cache server:
+
+```go
+store := memorystore.NewMemoryStoreWithConfig(memorystore.Config{
+	PubSub:            gcpOrAzureClient,
+	InvalidationTopic: "cache-invalidations",
+})
+defer store.Stop()
+
+// Local Set, SetMulti, and Delete broadcast compact invalidation events tagged
+// with store.InstanceID() so peer pods evict stale keys without self-echo loops.
+```
+
+### Bounded Capacity & Eviction Callbacks
+
+Guard against unbounded memory growth with soft global `MaxItems` / `MaxBytes` limits (zero overhead when unset) and an `OnEvict` hook invoked outside shard locks:
+
+```go
+store := memorystore.NewMemoryStoreWithConfig(memorystore.Config{
+	MaxItems: 100_000,
+	MaxBytes: 256 * 1024 * 1024, // 256 MiB key+value payload budget
+	OnEvict: func(key string, value []byte, reason memorystore.EvictReason) {
+		// reason is EvictExpired, EvictCapacity, or EvictDeleted
+	},
+})
 ```
 
 ### Batch Operations
@@ -344,10 +394,11 @@ Full API documentation is available on [pkg.go.dev](https://pkg.go.dev/github.co
 
 ```text
 .
-├── memorystore/        # Core zero-dependency cache & PubSubClient interface
+├── memorystore/        # Core zero-dependency cache, generic helpers & PubSubClient
 ├── pubsub/gcp/         # Standalone Go module for Google Cloud Pub/Sub (v2)
 ├── pubsub/azure/       # Standalone Go module for Azure Service Bus
-├── docs/images/        # Architecture diagrams
+├── benchmarks/         # Isolated head-to-head comparison benchmarks vs peer caches
+├── docs/images/        # Architecture & benchmark SVG diagrams
 ├── examples/basic/     # Runnable usage example
 ├── Makefile            # Multi-module build, test, lint, and benchmark targets
 └── .github/            # CI, release workflow, Dependabot, and issue/PR templates
@@ -363,16 +414,22 @@ Full API documentation is available on [pkg.go.dev](https://pkg.go.dev/github.co
 
 ## Performance & Benchmarks
 
-MemoryStore is engineered for low latency, high multi-core scalability, and minimal GC pressure on Go 1.27+:
+![MemoryStore Head-to-Head Go Cache Benchmarks](./docs/images/benchmarks.svg)
 
-- **Go 1.27 runtime advantages:** Size-specialized small allocations (<80 B), default Green Tea GC, stack-allocated slice backing stores, and container-aware `GOMAXPROCS`.
-- **Zero-allocation shard hashing:** `hash/maphash.String` with power-of-2 bitmasking.
-- **Zero cross-core metric contention:** 256 inline 64-byte cache-line padded shards, each owning its own `sync.RWMutex` and `atomic.Int64` hit/miss/eviction counters.
-- **Pointer-free expiration:** Monotonic `int64` nanosecond offsets shrink each cache entry from 48 B to 32 B and cut GC pointer scanning.
-- **Stack-allocated batch grouping:** Intrusive-index shard bucketing with stack scratch buffers achieves **0 B/op, 0 allocs/op** on `SetMulti` batches up to 128 keys.
-- **O(1) exact-topic Pub/Sub + zero-alloc wildcards:** Separate exact and wildcard subscription maps in `InMemoryPubSub`.
+### Head-to-Head Comparison (`benchmarks/`, Go 1.27.4, Intel Core i9-12900K, 12 threads, `n=5`)
 
-Representative `benchstat` results (`go1.27.4`, `linux/amd64`, Intel Core i9-12900K, `n=6`, `-benchtime=500ms`):
+| Library | `Set` | `Get` | `GetParallel` | `MixedParallel` (87.5% R / 12.5% W) | Allocations (all 4) |
+| :--- | ---: | ---: | ---: | ---: | :---: |
+| **MemoryStore** | **54.8 ns** (0 B) | **47.6 ns** (0 B) | **8.2 ns** (0 B) | **32.2 ns** (0 B) | **0 B / 0 allocs** |
+| `otter/v2` | 123.7 ns (1 alloc) | 44.1 ns (0 B) | 4.6 ns (0 B) | 9.0 ns (3 B) | 0–1 allocs |
+| `freecache` | 85.3 ns (0 B) | 107.9 ns (1 alloc) | 25.4 ns (1 alloc) | 28.7 ns (56 B) | 0–1 allocs |
+| `go-cache` | 81.7 ns (1 alloc) | 52.8 ns (0 B) | 40.9 ns (0 B) | 62.7 ns (3 B) | 0–1 allocs |
+| `bigcache/v3` | 266.9 ns | 126.9 ns (2 allocs) | 13.7 ns (2 allocs) | 52.9 ns (1 alloc) | 0–2 allocs |
+| `ristretto/v2` | 246.2 ns (1 alloc) | 78.8 ns (2 B) | 11.1 ns (0 B) | 71.1 ns (17 B) | 0–1 allocs |
+
+Reproduce head-to-head benchmarks via `make bench-compare` (see [benchmarks/README.md](benchmarks/README.md)).
+
+### Internal Benchmarks (`benchstat`, `go1.27.4`, Intel Core i9-12900K)
 
 | Benchmark | Time / op | Bytes / op | Allocs / op |
 | :--- | ---: | ---: | ---: |

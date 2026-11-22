@@ -1,34 +1,36 @@
 // Package memorystore provides a zero-dependency, thread-safe, sharded in-memory
-// key-value cache with automatic TTL expiration, standard-library encoding/json/v2
-// serialization, low-allocation batch operations, per-shard metrics, and a
-// pluggable Publish/Subscribe interface.
+// key-value cache with automatic TTL expiration, optional bounded capacity,
+// stampede protection, Go 1.27 generic JSON helpers (encoding/json/v2),
+// low-allocation batch operations, per-shard metrics, and a pluggable
+// Publish/Subscribe layer with optional distributed cache invalidation.
 //
-// # Storage and Concurrency
+// # Storage, Concurrency, and Bounded Capacity
 //
-// MemoryStore partitions keys across 256 inline, cache-line padded shards routed
-// via zero-allocation hash/maphash hashing. Each shard owns its own sync.RWMutex
-// and atomic metrics counters to minimize lock contention and cross-core false
-// sharing under high concurrency.
+// MemoryStore partitions keys across 256 inline, 64-byte cache-line aligned
+// shards routed via zero-allocation hash/maphash hashing. Each shard owns its
+// own sync.RWMutex, atomic hit/miss/eviction counters, and byte tracker.
+// Optional Config.MaxItems and Config.MaxBytes enforce soft global bounds using
+// volatile-TTL sampling without impacting unbounded hot paths, and Config.OnEvict
+// receives expiration, capacity, and deletion notifications outside shard locks.
 //
-// # JSON Serialization
+// # JSON Serialization, Generic Methods, and Stampede Protection
 //
-// SetJSON and GetJSON serialize and deserialize structured values using Go 1.27's
-// encoding/json/v2 package. Callers that need custom encoding/json/v2 or jsontext
-// options—including encoding/json.DefaultOptionsV1 for legacy v1 semantics—can use
-// SetJSONWithOptions and GetJSONWithOptions.
+// SetJSON, GetJSON, SetJSONWithOptions, and GetJSONWithOptions use Go 1.27's
+// standard library encoding/json/v2 package. Go 1.27 generic methods GetJSONAs[T]
+// and GetOrLoadJSON[T] provide type-safe reads and singleflight-protected cache
+// population alongside raw-byte GetOrLoad.
 //
-// # Pluggable Publish / Subscribe
+// # Pluggable Pub/Sub & Distributed Cache Invalidation
 //
-// MemoryStore delegates Pub/Sub operations to any PubSubClient implementation
-// passed via Config.PubSub. Because PubSubClient uses only standard library
-// types, external adapters (such as github.com/BryceWayne/MemoryStore/pubsub/gcp,
-// Redis, NATS, or Kafka) can satisfy it without importing package memorystore.
-// When Config.PubSub is nil, MemoryStore uses the built-in InMemoryPubSub broker,
-// which provides O(1) exact-topic routing and zero-allocation ':'-delimited
-// wildcard matching.
+// MemoryStore delegates Pub/Sub operations to any PubSubClient passed via
+// Config.PubSub (defaulting to InMemoryPubSub with O(1) exact-topic lookup and
+// zero-allocation wildcard matching). Setting Config.InvalidationTopic enables
+// automatic cross-node cache invalidation over PubSub with per-instance UUID
+// echo suppression so multi-pod deployments stay coherent without Redis.
 //
 // # Lifecycle
 //
 // Always call Stop when finished with a MemoryStore instance to halt background
-// expiration cleanup, close the PubSubClient, and release stored data.
+// expiration cleanup and invalidation listeners, close the PubSubClient, and
+// release stored data.
 package memorystore
