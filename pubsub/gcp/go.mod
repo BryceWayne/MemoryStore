@@ -8,7 +8,7 @@ require (
 	cloud.google.com/go/pubsub/v2 v2.3.0
 	google.golang.org/api v0.247.0
 	google.golang.org/grpc v1.74.2
-	google.golang.org/protobuf v1.36.7
+	google.golang.org/protobuf v1.36.12
 )
 
 require (
