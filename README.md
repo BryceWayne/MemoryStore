@@ -304,6 +304,7 @@ Full API documentation is available on [pkg.go.dev](https://pkg.go.dev/github.co
 .
 ├── memorystore/        # Core zero-dependency cache & PubSubClient interface
 ├── pubsub/gcp/         # Standalone Go module for Google Cloud Pub/Sub (v2)
+├── docs/images/        # Architecture diagrams
 ├── examples/basic/     # Runnable usage example
 ├── Makefile            # Multi-module build, test, lint, and benchmark targets
 └── .github/            # CI, release workflow, Dependabot, and issue/PR templates
@@ -313,53 +314,7 @@ Full API documentation is available on [pkg.go.dev](https://pkg.go.dev/github.co
 
 ## Architecture
 
-```mermaid
-graph TD
-    subgraph Client Layer
-        User[User Application]
-    end
-
-    subgraph "MemoryStore Core (Zero External Dependencies)"
-        API[MemoryStore API]
-
-        subgraph "Storage Engine"
-            Hash["hash/maphash Shard Router"]
-            Shards["256 Cache-Line Padded Shards (with Per-Shard Atomic Metrics)"]
-        end
-
-        subgraph "Serialization"
-            JSONv2["encoding/json/v2"]
-        end
-
-        subgraph "Background Services"
-            Cleaner[Configurable Expiration Sweeper]
-        end
-
-        subgraph "Pub/Sub Abstraction"
-            PS_Interface["PubSubClient Interface (stdlib types only)"]
-            PS_Mem["InMemoryPubSub (O(1) Exact + Zero-Alloc Wildcards)"]
-        end
-    end
-
-    subgraph "Optional Pluggable Adapters"
-        PS_GCP["pubsub/gcp (Cloud Pub/Sub v2)"]
-        PS_Custom["Custom Adapters (Redis, NATS, Kafka, ...)"]
-    end
-
-    User -->|Set / Get / Batch| API
-    User -->|SetJSON / GetJSON| JSONv2
-    JSONv2 --> API
-    User -->|Subscribe / Publish| API
-
-    API --> Hash --> Shards
-    API --> PS_Interface
-
-    Cleaner -->|Periodic Per-Shard Sweep| Shards
-
-    PS_Interface -->|Default| PS_Mem
-    PS_Interface -->|Config.PubSub| PS_GCP
-    PS_Interface -->|Config.PubSub| PS_Custom
-```
+![MemoryStore Sharded Cache and Pluggable Pub/Sub Architecture](./docs/images/architecture.svg)
 
 ---
 
