@@ -36,14 +36,14 @@
 
 ## Features
 
-- **Zero External Dependencies (Core):** The root `github.com/BryceWayne/MemoryStore` module uses **only the Go 1.27 standard library**. Optional broker adapters (`pubsub/gcp`, `pubsub/azure`) live in standalone sub-modules.
+- **Zero External Dependencies (Core):** The root `github.com/BryceWayne/MemoryStore` module uses **only the Go 1.27 standard library**. Optional broker adapters (`pubsub/gcp`, `pubsub/azure`, `pubsub/redis`, `pubsub/nats`, `pubsub/aws`, `pubsub/kafka`) live in standalone sub-modules.
 - **High-Throughput Sharded Concurrency:** 256 inline, 64-byte cache-line aligned shards with per-shard `sync.RWMutex` locks, per-shard `atomic.Int64` metrics, and zero-allocation `hash/maphash` routing (`8.2 ns/op` 12-core parallel reads, `#1` single-threaded writes).
-- **Distributed Cache Invalidation Backplane:** Opt in via `Config.InvalidationTopic` to keep local RAM caches coherent across pods over GCP Pub/Sub, Azure Service Bus, Redis, NATS, or any `PubSubClient` — with automatic per-instance UUID echo suppression.
+- **Distributed Cache Invalidation Backplane:** Opt in via `Config.InvalidationTopic` to keep local RAM caches coherent across pods over GCP Pub/Sub, Azure Service Bus, Redis/Valkey, NATS, AWS SNS + SQS, Apache Kafka / Redpanda, or any `PubSubClient` — with automatic per-instance UUID echo suppression.
 - **Go 1.27 Generic Methods & Stampede Protection:** Typed `GetJSONAs[T]` and singleflight-protected `GetOrLoad` / `GetOrLoadJSON[T]` coalesce concurrent cache misses into a single upstream load.
 - **Bounded Capacity & Eviction Callbacks:** Optional `Config.MaxItems`, `Config.MaxBytes` (volatile-TTL sampled eviction with zero overhead on unbounded caches), and lock-free `Config.OnEvict` callbacks.
 - **Standard Library JSON v2:** Built on Go 1.27's `encoding/json/v2` with strict RFC 8259 defaults and optional `json.Options` customization (`SetJSONWithOptions` / `GetJSONWithOptions`).
 - **Zero-Allocation Batch Writes:** `SetMulti` and `GetMulti` group keys per shard with stack-allocated scratch buffers (for batches up to 128 keys).
-- **Pluggable, Context-Aware Pub/Sub:** Provider-agnostic `PubSubClient` interface (using only stdlib types) supporting In-Memory (O(1) exact routing + zero-alloc wildcard matching), Google Cloud Pub/Sub v2 (`pubsub/gcp`), Azure Service Bus (`pubsub/azure`), or custom brokers.
+- **Pluggable, Context-Aware Pub/Sub:** Provider-agnostic `PubSubClient` interface (using only stdlib types) supporting In-Memory (O(1) exact routing + zero-alloc wildcard matching), Google Cloud Pub/Sub v2 (`pubsub/gcp`), Azure Service Bus (`pubsub/azure`), Redis / Valkey (`pubsub/redis`), NATS / JetStream (`pubsub/nats`), AWS SNS + SQS (`pubsub/aws`), Apache Kafka / Redpanda (`pubsub/kafka`), or custom brokers.
 - **Library-Friendly Logging:** Silent by default (`slog.DiscardHandler`); opt in via `Config.Logger`.
 - **Verified Quality:** Tested under `-race` and Go 1.27's `goroutineleak` profiler.
 
@@ -63,7 +63,7 @@ Install the zero-dependency core module:
 go get github.com/BryceWayne/MemoryStore/memorystore
 ```
 
-*(Optional)* Install a standalone cloud Pub/Sub adapter:
+*(Optional)* Install a standalone Pub/Sub adapter:
 
 ```bash
 # Google Cloud Pub/Sub (v2)
@@ -71,6 +71,18 @@ go get github.com/BryceWayne/MemoryStore/pubsub/gcp
 
 # Azure Service Bus
 go get github.com/BryceWayne/MemoryStore/pubsub/azure
+
+# Redis / Valkey
+go get github.com/BryceWayne/MemoryStore/pubsub/redis
+
+# NATS / JetStream
+go get github.com/BryceWayne/MemoryStore/pubsub/nats
+
+# AWS SNS + SQS
+go get github.com/BryceWayne/MemoryStore/pubsub/aws
+
+# Apache Kafka / Redpanda (pure Go, zero cgo)
+go get github.com/BryceWayne/MemoryStore/pubsub/kafka
 ```
 
 ---
@@ -184,11 +196,11 @@ raw, err := store.GetOrLoad(ctx, "report:daily", 10*time.Minute, func(ctx contex
 
 ### Distributed Cache Invalidation (Multi-Pod Coherency)
 
-Keep local RAM reads (~8 ns) coherent across multiple application pods over any `PubSubClient` (`pubsub/gcp`, `pubsub/azure`, Redis, NATS, etc.) without a central cache server:
+Keep local RAM reads (~8 ns) coherent across multiple application pods over any `PubSubClient` (`pubsub/gcp`, `pubsub/azure`, `pubsub/redis`, `pubsub/nats`, `pubsub/aws`, `pubsub/kafka`, etc.) without a central cache server:
 
 ```go
 store := memorystore.NewMemoryStoreWithConfig(memorystore.Config{
-	PubSub:            gcpOrAzureClient,
+	PubSub:            pubsubClient,
 	InvalidationTopic: "cache-invalidations",
 })
 defer store.Stop()
@@ -345,6 +357,141 @@ store := memorystore.NewMemoryStoreWithConfig(memorystore.Config{
 defer store.Stop()
 ```
 
+#### Redis / Valkey (`pubsub/redis` sub-module)
+
+Backed by `go-redis/v9`'s `UniversalClient` for standalone Redis/Valkey, Redis Sentinel, and Redis Cluster topologies. Automatically routes exact topics via `SUBSCRIBE` and wildcard globs (`*`, `?`, `[`) via `PSUBSCRIBE`:
+
+```go
+import (
+	"log"
+	"time"
+
+	"github.com/BryceWayne/MemoryStore/memorystore"
+	"github.com/BryceWayne/MemoryStore/pubsub/redis"
+	goredis "github.com/redis/go-redis/v9"
+)
+
+redisClient, err := redis.NewClient(&goredis.UniversalOptions{
+	Addrs: []string{"127.0.0.1:6379"},
+})
+if err != nil {
+	log.Fatal(err)
+}
+
+// Or wrap an existing caller-managed redis.UniversalClient:
+// redisClient, err := redis.NewClientFromClient(existingClient)
+
+store := memorystore.NewMemoryStoreWithConfig(memorystore.Config{
+	PubSub:        redisClient,
+	PubSubTimeout: 5 * time.Second,
+})
+defer store.Stop()
+```
+
+#### NATS / JetStream (`pubsub/nats` sub-module)
+
+Supports Core NATS (`*` single-token and `>` multi-token dot-delimited wildcards), optional queue groups (`WithQueueGroup`), and optional JetStream durability (`WithJetStream`):
+
+```go
+import (
+	"log"
+	"time"
+
+	"github.com/BryceWayne/MemoryStore/memorystore"
+	"github.com/BryceWayne/MemoryStore/pubsub/nats"
+)
+
+natsClient, err := nats.NewClient("nats://127.0.0.1:4222")
+if err != nil {
+	log.Fatal(err)
+}
+
+// Or enable JetStream, queue groups, or wrap an existing *nats.Conn:
+// natsClient, err := nats.NewClient("nats://127.0.0.1:4222", nats.WithJetStream("cache-events"))
+// natsClient, err := nats.NewClient("nats://127.0.0.1:4222", nats.WithQueueGroup("cache-workers"))
+// natsClient, err := nats.NewClientFromConn(existingConn) // import natsgo "github.com/nats-io/nats.go"
+
+store := memorystore.NewMemoryStoreWithConfig(memorystore.Config{
+	PubSub:        natsClient,
+	PubSubTimeout: 5 * time.Second,
+})
+defer store.Stop()
+```
+
+#### AWS SNS + SQS (`pubsub/aws` sub-module)
+
+Fans out messages via AWS SNS topics to SQS long-polling (`ReceiveMessage`). Supports ephemeral auto-managed SQS queues (default) or pre-provisioned least-privilege IAM resources (`WithQueueURL`, `WithTopicARN`):
+
+```go
+import (
+	"context"
+	"log"
+	"time"
+
+	"github.com/BryceWayne/MemoryStore/memorystore"
+	"github.com/BryceWayne/MemoryStore/pubsub/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+)
+
+ctx := context.Background()
+cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion("us-east-1"))
+if err != nil {
+	log.Fatal(err)
+}
+
+// Ephemeral auto-managed SQS queue per subscription (default)
+awsClient, err := aws.NewClient(cfg)
+if err != nil {
+	log.Fatal(err)
+}
+
+// Or for least-privilege IAM (only sns:Publish, sqs:ReceiveMessage, sqs:DeleteMessage):
+// awsClient, err := aws.NewClient(
+//     cfg,
+//     aws.WithTopicARN("arn:aws:sns:us-east-1:123456789012:cache-invalidation"),
+//     aws.WithQueueURL("https://sqs.us-east-1.amazonaws.com/123456789012/pod-1-invalidation"),
+// )
+
+store := memorystore.NewMemoryStoreWithConfig(memorystore.Config{
+	PubSub:        awsClient,
+	PubSubTimeout: 5 * time.Second,
+})
+defer store.Stop()
+```
+
+#### Apache Kafka / Redpanda (`pubsub/kafka` sub-module)
+
+Pure-Go (`CGO_ENABLED=0`) Kafka/Redpanda adapter backed by `franz-go` (`kgo`). Defaults to broadcast mode (isolated consumers starting at the latest log-end offset `AtEnd` so every pod receives new events) with optional shared consumer groups (`WithConsumerGroup`), TLS (`WithTLSConfig`), and SASL/SCRAM (`WithSCRAMSHA256`, `WithSCRAMSHA512`, `WithSASL`):
+
+```go
+import (
+	"log"
+	"time"
+
+	"github.com/BryceWayne/MemoryStore/memorystore"
+	"github.com/BryceWayne/MemoryStore/pubsub/kafka"
+)
+
+kafkaClient, err := kafka.NewClient([]string{"127.0.0.1:9092"})
+if err != nil {
+	log.Fatal(err)
+}
+
+// Or configure TLS, SCRAM authentication, or a shared consumer group:
+// kafkaClient, err := kafka.NewClient(
+//     []string{"broker-1:9093"},
+//     kafka.WithTLSConfig(tlsCfg),
+//     kafka.WithSCRAMSHA256("user", "password"),
+//     kafka.WithConsumerGroup("worker-group"),
+// )
+
+store := memorystore.NewMemoryStoreWithConfig(memorystore.Config{
+	PubSub:        kafkaClient,
+	PubSubTimeout: 5 * time.Second,
+})
+defer store.Stop()
+```
+
 ### Configuration, Logging & Lifecycle
 
 ```go
@@ -397,6 +544,10 @@ Full API documentation is available on [pkg.go.dev](https://pkg.go.dev/github.co
 ├── memorystore/        # Core zero-dependency cache, generic helpers & PubSubClient
 ├── pubsub/gcp/         # Standalone Go module for Google Cloud Pub/Sub (v2)
 ├── pubsub/azure/       # Standalone Go module for Azure Service Bus
+├── pubsub/redis/       # Standalone Go module for Redis / Valkey Pub/Sub
+├── pubsub/nats/        # Standalone Go module for NATS / JetStream
+├── pubsub/aws/         # Standalone Go module for AWS SNS + SQS
+├── pubsub/kafka/       # Standalone pure-Go module for Apache Kafka / Redpanda
 ├── benchmarks/         # Isolated head-to-head comparison benchmarks vs peer caches
 ├── docs/images/        # Architecture & benchmark SVG diagrams
 ├── examples/basic/     # Runnable usage example
