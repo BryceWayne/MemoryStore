@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-22
+
+First stable **v1.0.0** release of **MemoryStore** (core module + standalone `pubsub/gcp` and `pubsub/azure` adapters), built for **Go 1.27+**.
+
 ### Added
 - **Distributed Cache Invalidation Backplane:** Setting `Config.InvalidationTopic` automatically broadcasts compact `encoding/json/v2` invalidation events on local `Set`, `SetMulti`, and `Delete` calls over any `PubSubClient` (`InMemoryPubSub`, `pubsub/gcp`, `pubsub/azure`, or custom brokers), with per-instance RFC 9562 UUID echo suppression (`MemoryStore.InstanceID()`).
 - **Go 1.27 Generic Methods & Stampede Protection:**
@@ -86,6 +90,7 @@ Initial tagged release of **MemoryStore**, built for **Go 1.27+**.
 - Pluggable `PubSubClient` interface with In-Memory wildcard broker and Google Cloud Pub/Sub backend.
 - Race-tested unit test suite, Makefile automation, and GitHub Actions CI.
 
-[Unreleased]: https://github.com/BryceWayne/MemoryStore/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/BryceWayne/MemoryStore/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/BryceWayne/MemoryStore/compare/v0.2.0...v1.0.0
 [0.2.0]: https://github.com/BryceWayne/MemoryStore/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/BryceWayne/MemoryStore/releases/tag/v0.1.0

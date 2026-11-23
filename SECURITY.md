@@ -6,8 +6,8 @@ The following versions of **MemoryStore** are currently supported with security 
 
 | Version | Go Version | Supported |
 | :--- | :--- | :---: |
-| `0.2.x` / `root` | Go 1.27+ | :white_check_mark: |
-| `< 0.2.0` | Go < 1.27 / legacy | :x: |
+| `1.x` / `root` | Go 1.27+ | :white_check_mark: |
+| `< 1.0.0` | Go < 1.27 / pre-1.0 | :x: |
 
 ## Reporting a Vulnerability
 
