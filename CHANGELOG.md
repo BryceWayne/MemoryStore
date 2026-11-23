@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-23
+
+Adds four standalone Go 1.27+ Pub/Sub adapters (`pubsub/redis`, `pubsub/nats`, `pubsub/aws`, and `pubsub/kafka`) with zero dependency on the root `memorystore` package, expands CI/Makefile/Dependabot/README coverage across all six `pubsub/*` modules, and raises `pubsub/gcp` offline test coverage to 98%+.
+
+### Added
+- **Standalone Redis / Valkey Pub/Sub adapter (`pubsub/redis`, #37):** `github.com/BryceWayne/MemoryStore/pubsub/redis` backed by `github.com/redis/go-redis/v9` supporting `redis.UniversalClient` (standalone, Sentinel, Cluster), `NewClient` and `NewClientFromClient`, exact `SUBSCRIBE` and wildcard `*` `PSUBSCRIBE` routing, `WithChannelBuffer`, `WithCloseClient`, and offline `miniredis/v2` + Go 1.27 `goroutineleak` tests (95.4% coverage).
+- **Standalone NATS Pub/Sub adapter (`pubsub/nats`, #38):** `github.com/BryceWayne/MemoryStore/pubsub/nats` backed by `github.com/nats-io/nats.go` supporting `NewClient` and `NewClientFromConn`, NATS `*`/`>` subject wildcards, `WithQueueGroup`, `WithCloseConn`, `WithNATSOptions`, `WithDrainTimeout`, optional JetStream durable delivery mode, and embedded `nats-server/v2` + `goroutineleak` tests (89.4% coverage).
+- **Standalone AWS SNS + SQS Pub/Sub adapter (`pubsub/aws`, #39):** `github.com/BryceWayne/MemoryStore/pubsub/aws` backed by the AWS SDK for Go v2 (`service/sns` + `service/sqs`) supporting default ephemeral auto-managed SQS queues (with automatic policy setup and cleanup on `Unsubscribe`/`Close`), pre-provisioned least-privilege IAM mode (`WithQueueURL`, `WithAutoManage(false)`), and offline fake/`httptest.Server` + `goroutineleak` tests (93.8% coverage).
+- **Standalone Apache Kafka / Redpanda adapter (`pubsub/kafka`, #40):** Pure-Go (`CGO_ENABLED=0`, zero cgo) `github.com/BryceWayne/MemoryStore/pubsub/kafka` backed by `github.com/twmb/franz-go/pkg/kgo` supporting default `AtEnd()` broadcast mode, optional shared consumer groups (`WithConsumerGroup`), pass-through TLS and SASL/SCRAM auth options, clean flush/shutdown, and offline `kfake` + `goroutineleak` tests (86.6% coverage).
+- **Repository, CI & Docs Integration:** Added `pubsub/redis`, `pubsub/nats`, `pubsub/aws`, and `pubsub/kafka` to `Makefile`, `.github/workflows/go.yml`, `.github/workflows/release.yml`, `.github/dependabot.yml`, and `README.md` (including `CGO_ENABLED=0` pure-Go Kafka verification).
+
+### Changed
+- **Expanded `pubsub/gcp` test suite:** Added offline `cloud.google.com/go/pubsub/v2/pstest` unit tests covering full Subscribe/Publish/Unsubscribe/Close lifecycles, gRPC error injection, slow-consumer `Nack`-on-cancel, concurrent `Publish`/`Close`, and `goroutineleak` verification, increasing statement coverage from **32.7%** to **98.0%+**.
+
 ## [1.0.0] - 2026-11-22
 
 First stable **v1.0.0** release of **MemoryStore** (core module + standalone `pubsub/gcp` and `pubsub/azure` adapters), built for **Go 1.27+**.
@@ -90,7 +104,8 @@ Initial tagged release of **MemoryStore**, built for **Go 1.27+**.
 - Pluggable `PubSubClient` interface with In-Memory wildcard broker and Google Cloud Pub/Sub backend.
 - Race-tested unit test suite, Makefile automation, and GitHub Actions CI.
 
-[Unreleased]: https://github.com/BryceWayne/MemoryStore/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/BryceWayne/MemoryStore/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/BryceWayne/MemoryStore/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/BryceWayne/MemoryStore/compare/v0.2.0...v1.0.0
 [0.2.0]: https://github.com/BryceWayne/MemoryStore/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/BryceWayne/MemoryStore/releases/tag/v0.1.0

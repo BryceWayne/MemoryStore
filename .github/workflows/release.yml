@@ -29,6 +29,10 @@ jobs:
           go mod verify
           (cd pubsub/gcp && go mod download && go mod verify)
           (cd pubsub/azure && go mod download && go mod verify)
+          (cd pubsub/redis && go mod download && go mod verify)
+          (cd pubsub/nats && go mod download && go mod verify)
+          (cd pubsub/aws && go mod download && go mod verify)
+          (cd pubsub/kafka && go mod download && go mod verify)
 
       - name: Verify formatting
         run: |
@@ -44,6 +48,10 @@ jobs:
           go vet ./...
           (cd pubsub/gcp && go vet ./...)
           (cd pubsub/azure && go vet ./...)
+          (cd pubsub/redis && go vet ./...)
+          (cd pubsub/nats && go vet ./...)
+          (cd pubsub/aws && go vet ./...)
+          (cd pubsub/kafka && go vet ./...)
 
       - name: Install golangci-lint
         run: |
@@ -54,18 +62,31 @@ jobs:
           golangci-lint run ./...
           (cd pubsub/gcp && golangci-lint run --config ../../.golangci.yml ./...)
           (cd pubsub/azure && golangci-lint run --config ../../.golangci.yml ./...)
+          (cd pubsub/redis && golangci-lint run --config ../../.golangci.yml ./...)
+          (cd pubsub/nats && golangci-lint run --config ../../.golangci.yml ./...)
+          (cd pubsub/aws && golangci-lint run --config ../../.golangci.yml ./...)
+          (cd pubsub/kafka && golangci-lint run --config ../../.golangci.yml ./...)
 
       - name: Test with race detector
         run: |
           go test -count=1 -race -cover ./...
           (cd pubsub/gcp && go test -count=1 -race -cover ./...)
           (cd pubsub/azure && go test -count=1 -race -cover ./...)
+          (cd pubsub/redis && go test -count=1 -race -cover ./...)
+          (cd pubsub/nats && go test -count=1 -race -cover ./...)
+          (cd pubsub/aws && go test -count=1 -race -cover ./...)
+          (cd pubsub/kafka && go test -count=1 -race -cover ./...)
 
       - name: Build
         run: |
           go build -v ./...
           (cd pubsub/gcp && go build -v ./...)
           (cd pubsub/azure && go build -v ./...)
+          (cd pubsub/redis && go build -v ./...)
+          (cd pubsub/nats && go build -v ./...)
+          (cd pubsub/aws && go build -v ./...)
+          (cd pubsub/kafka && go build -v ./...)
+          (cd pubsub/kafka && CGO_ENABLED=0 go build -v ./...)
 
       - name: Create GitHub Release
         env:

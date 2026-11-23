@@ -2,6 +2,8 @@
 
 .PHONY: all build clean test bench bench-compare lint fmt vet coverage run-example help
 
+SUBMODULES := pubsub/gcp pubsub/azure pubsub/redis pubsub/nats pubsub/aws pubsub/kafka
+
 # Default target
 all: clean fmt vet lint test build
 
@@ -9,19 +11,21 @@ all: clean fmt vet lint test build
 build:
 	@echo "Building MemoryStore..."
 	go build ./...
-	@echo "Building pubsub/gcp..."
-	cd pubsub/gcp && go build ./...
-	@echo "Building pubsub/azure..."
-	cd pubsub/azure && go build ./...
+	@for mod in $(SUBMODULES); do \
+		echo "Building $$mod..."; \
+		(cd $$mod && go build ./...) || exit 1; \
+	done
+	@echo "Verifying pubsub/kafka pure-Go build (CGO_ENABLED=0)..."
+	cd pubsub/kafka && CGO_ENABLED=0 go build ./...
 
 # Run tests with race detection and coverage across all modules
 test:
 	@echo "Running tests (root module)..."
 	go test -count=1 -race -cover ./...
-	@echo "Running tests (pubsub/gcp)..."
-	cd pubsub/gcp && go test -count=1 -race -cover ./...
-	@echo "Running tests (pubsub/azure)..."
-	cd pubsub/azure && go test -count=1 -race -cover ./...
+	@for mod in $(SUBMODULES); do \
+		echo "Running tests ($$mod)..."; \
+		(cd $$mod && go test -count=1 -race -cover ./...) || exit 1; \
+	done
 
 # Generate HTML coverage report for core memorystore
 coverage:
@@ -44,24 +48,26 @@ bench-compare:
 lint:
 	@echo "Running linter (root module)..."
 	golangci-lint run ./...
-	@echo "Running linter (pubsub/gcp)..."
-	cd pubsub/gcp && golangci-lint run --config ../../.golangci.yml ./...
-	@echo "Running linter (pubsub/azure)..."
-	cd pubsub/azure && golangci-lint run --config ../../.golangci.yml ./...
+	@for mod in $(SUBMODULES); do \
+		echo "Running linter ($$mod)..."; \
+		(cd $$mod && golangci-lint run --config ../../.golangci.yml ./...) || exit 1; \
+	done
 
 # Format code across all modules
 fmt:
 	@echo "Formatting code..."
 	go fmt ./...
-	cd pubsub/gcp && go fmt ./...
-	cd pubsub/azure && go fmt ./...
+	@for mod in $(SUBMODULES); do \
+		(cd $$mod && go fmt ./...) || exit 1; \
+	done
 
 # Vet code across all modules
 vet:
 	@echo "Vetting code..."
 	go vet ./...
-	cd pubsub/gcp && go vet ./...
-	cd pubsub/azure && go vet ./...
+	@for mod in $(SUBMODULES); do \
+		(cd $$mod && go vet ./...) || exit 1; \
+	done
 
 # Run the basic usage example
 run-example:
@@ -71,7 +77,10 @@ run-example:
 clean:
 	@echo "Cleaning up..."
 	go clean
-	rm -f memory_store coverage.out coverage.html gofmt_diff.txt
+	@for mod in $(SUBMODULES); do \
+		(cd $$mod && go clean) || exit 1; \
+	done
+	rm -f memory_store coverage.out coverage.html gofmt_diff.txt pubsub/*/coverage.out pubsub/*/*.test
 
 # Show help
 help:
