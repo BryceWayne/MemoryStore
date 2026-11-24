@@ -988,13 +988,25 @@ func TestTier1_F11_InvalidateOnly_PeerInvalidatedAndEchoSuppressed(t *testing.T)
 		memorystore.WithSyncInvalidation(),
 	)
 
-	// Populate keys on peer s2 first.
+	// Populate keys on peer s2 first, then drain s1's backplane listener via a
+	// FIFO sentinel so s2's invalidation for shared-1 cannot arrive at s1 after
+	// s1.Set("shared-1", "new") and falsely trip the echo-suppression check.
+	if err := s1.Set("drain-sentinel", []byte("1"), time.Minute); err != nil {
+		t.Fatalf("s1.Set(drain-sentinel) failed: %v", err)
+	}
 	if err := s2.Set("shared-1", []byte("old"), time.Minute); err != nil {
 		t.Fatalf("s2.Set(shared-1) failed: %v", err)
 	}
 	if err := s2.Set("shared-2", []byte("to-delete"), time.Minute); err != nil {
 		t.Fatalf("s2.Set(shared-2) failed: %v", err)
 	}
+	if err := s2.Set("drain-sentinel", []byte("2"), time.Minute); err != nil {
+		t.Fatalf("s2.Set(drain-sentinel) failed: %v", err)
+	}
+	eventually(t, time.Second, 5*time.Millisecond, func() bool {
+		_, ok := s1.Get("drain-sentinel")
+		return !ok
+	}, "expected s1 to drain s2 invalidations before s1.Set echo check")
 
 	// s1.Set invalidates s2 while suppressing echo on s1.
 	if err := s1.Set("shared-1", []byte("new"), time.Minute); err != nil {

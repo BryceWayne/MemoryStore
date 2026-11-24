@@ -997,9 +997,14 @@ func TestTier2_F11_WriteThroughMaxBytes_BoundaryAndFallbackToInvalidateOnly(t *t
 	)
 
 	// Pre-seed "big" on s2 with stale value so fallback InvalidateOnly evicts it to a miss.
+	// Wait for s1 to consume s2's WriteThrough message so it cannot race with s1.Set("big", bigVal).
 	if err := s2.Set("big", []byte("stale-old-value"), time.Minute); err != nil {
 		t.Fatalf("s2.Set(big) error = %v", err)
 	}
+	eventually(t, time.Second, 5*time.Millisecond, func() bool {
+		v, ok := s1.Get("big")
+		return ok && string(v) == "stale-old-value"
+	}, "s1 did not receive pre-seeded s2 WriteThrough for big")
 
 	// Payload within maxWT writes through directly to s2.
 	smallVal := []byte("fits-within-limit")
