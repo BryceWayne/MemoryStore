@@ -526,9 +526,14 @@ func TestTier3_WriteThrough_MaxBytesFallback_MetricsRecorder(t *testing.T) {
 	}, "nodeA and nodeB should subscribe to invalidation topic")
 
 	// Pre-populate oversized key on nodeB to verify fallback invalidation evicts it.
+	// Wait for nodeA to consume nodeB's WriteThrough message before nodeA overwrites "oversized".
 	if err := nodeB.Set("oversized", []byte("stale-peer-value"), time.Minute); err != nil {
 		t.Fatalf("nodeB.Set(oversized) failed: %v", err)
 	}
+	eventually(t, time.Second, 5*time.Millisecond, func() bool {
+		v, ok := nodeA.Get("oversized")
+		return ok && string(v) == "stale-peer-value"
+	}, "nodeA did not receive pre-seeded nodeB WriteThrough for oversized")
 
 	// Small payload (<= 128 bytes) propagates via WriteThrough.
 	if err := nodeA.Set("small", []byte("compact-value"), time.Minute); err != nil {
