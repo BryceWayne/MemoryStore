@@ -33,10 +33,13 @@
 // from SNS and deletes the ephemeral SQS queue.
 //
 // Pre-provisioned least-privilege IAM mode: Configure a pre-provisioned queue
-// via WithQueueURL (which disables auto-management unless WithAutoManage(true)
-// is explicitly set) and optionally WithTopicARN (or pass full SNS topic ARNs
-// as the topic string), or call WithAutoManage(false). In this mode all topic,
-// queue, policy, and subscription management calls are skipped.
+// via WithQueueURL or WithQueueURLFunc (which takes precedence over
+// WithQueueURL for multi-topic setups; both disable auto-management unless
+// WithAutoManage(true) is explicitly set) and optionally WithTopicARN (or pass
+// full SNS topic ARNs as the topic string), or call WithAutoManage(false). In
+// this mode all topic, queue, policy, and subscription management calls are
+// skipped. Use WithLogger to capture structured warnings for receive retries,
+// delete failures, slow-consumer backpressure, and payload decode fallbacks.
 //
 // # RawMessageDelivery and SNS Envelopes
 //
@@ -62,17 +65,23 @@
 //
 // Default ephemeral auto-managed mode:
 //
+//	import (
+//	    "github.com/BryceWayne/MemoryStore/v2/memorystore"
+//	    "github.com/BryceWayne/MemoryStore/pubsub/aws"
+//	)
+//
 //	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion("us-east-1"))
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
-//	ps, err := aws.NewClient(cfg)
+//	ps, err := aws.NewClient(cfg, aws.WithLogger(slog.Default()))
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
-//	store := memorystore.NewMemoryStoreWithConfig(memorystore.Config{
-//	    PubSub: ps,
-//	})
+//	store, err := memorystore.New(memorystore.WithPubSub(ps))
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
 //	defer store.Stop()
 //
 // Pre-provisioned least-privilege IAM mode:
@@ -80,7 +89,9 @@
 //	ps, err := aws.NewClient(
 //	    cfg,
 //	    aws.WithTopicARN("arn:aws:sns:us-east-1:123456789012:cache-invalidation"),
-//	    aws.WithQueueURL("https://sqs.us-east-1.amazonaws.com/123456789012/pod-1-invalidation"),
+//	    aws.WithQueueURLFunc(func(topic string) string {
+//	        return "https://sqs.us-east-1.amazonaws.com/123456789012/" + topic
+//	    }),
 //	)
 //	if err != nil {
 //	    log.Fatal(err)

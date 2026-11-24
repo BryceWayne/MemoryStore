@@ -66,7 +66,10 @@ func (m *mockPubSub) Close() error {
 }
 
 func TestMemoryStore_SubscriberCount(t *testing.T) {
-	ms := NewMemoryStore()
+	ms, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	defer func() {
 		_ = ms.Stop()
 	}()
@@ -113,12 +116,15 @@ func TestMemoryStore_SubscriberCount(t *testing.T) {
 
 func TestMemoryStore_CustomPubSubAndConfig(t *testing.T) {
 	mock := newMockPubSub()
-	ms := NewMemoryStoreWithConfig(Config{
-		PubSub:          mock,
-		PubSubTimeout:   2 * time.Second,
-		CleanupInterval: 50 * time.Millisecond,
-		Logger:          slog.New(slog.DiscardHandler),
-	})
+	ms, err := New(
+		WithPubSub(mock),
+		WithPubSubTimeout(2*time.Second),
+		WithCleanupInterval(50*time.Millisecond),
+		WithLogger(slog.New(slog.DiscardHandler)),
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 
 	if _, err := ms.Subscribe("orders"); err != nil {
 		t.Fatalf("Subscribe() error = %v", err)
@@ -160,7 +166,10 @@ func TestMemoryStore_CustomPubSubAndConfig(t *testing.T) {
 }
 
 func TestMemoryStore_PubSub_Stopped(t *testing.T) {
-	ms := NewMemoryStore()
+	ms, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	_ = ms.Stop()
 
 	if _, err := ms.Subscribe("topic"); !errors.Is(err, ErrStoreStopped) {
@@ -175,7 +184,10 @@ func TestMemoryStore_PubSub_Stopped(t *testing.T) {
 }
 
 func TestMemoryStore_PubSub_CanceledContext(t *testing.T) {
-	ms := NewMemoryStore()
+	ms, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	defer func() {
 		_ = ms.Stop()
 	}()
@@ -195,13 +207,16 @@ func TestMemoryStore_PubSub_CanceledContext(t *testing.T) {
 }
 
 func TestMemoryStore_SetJSON_Error(t *testing.T) {
-	ms := NewMemoryStore()
+	ms, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	defer func() {
 		_ = ms.Stop()
 	}()
 
 	badValue := make(chan int)
-	err := ms.SetJSON("key", badValue, time.Minute)
+	err = ms.SetJSON("key", badValue, time.Minute)
 	if err == nil {
 		t.Error("SetJSON should return error for unserializable value")
 	}
@@ -209,8 +224,14 @@ func TestMemoryStore_SetJSON_Error(t *testing.T) {
 
 func TestShardCacheLineSize(t *testing.T) {
 	if unsafe.Sizeof(uintptr(0)) == 8 {
-		if got := unsafe.Sizeof(shard{}); got != 64 {
-			t.Errorf("sizeof(shard) = %d bytes, want 64 (single cache line)", got)
+		if got := unsafe.Sizeof(shard{}); got != 128 {
+			t.Errorf("sizeof(shard) = %d bytes, want 128 (two cache lines)", got)
+		}
+		if got := unsafe.Sizeof(bucket{}); got != 64 {
+			t.Errorf("sizeof(bucket) = %d bytes, want 64 (single cache line)", got)
+		}
+		if got := unsafe.Sizeof(entry{}); got != 96 {
+			t.Errorf("sizeof(entry) = %d bytes, want 96", got)
 		}
 	}
 }

@@ -2,7 +2,7 @@
 
 This isolated Go sub-module benchmarks **MemoryStore** against popular Go in-memory cache libraries without adding any third-party dependencies to the core `MemoryStore` module:
 
-- `github.com/BryceWayne/MemoryStore/memorystore`
+- `github.com/BryceWayne/MemoryStore/v2/memorystore`
 - `github.com/patrickmn/go-cache`
 - `github.com/allegro/bigcache/v3`
 - `github.com/coocood/freecache`

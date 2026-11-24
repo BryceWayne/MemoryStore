@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"runtime/pprof"
@@ -2248,6 +2249,197 @@ func TestClient_ConsumerGroupSubscribeAbortNoMessageLoss(t *testing.T) {
 	}
 }
 
+type kafkaLogEntry struct {
+	level   slog.Level
+	message string
+	attrs   map[string]string
+}
+
+type kafkaCaptureHandler struct {
+	mu      sync.Mutex
+	entries []kafkaLogEntry
+}
+
+func (h *kafkaCaptureHandler) Enabled(_ context.Context, lvl slog.Level) bool {
+	return lvl >= slog.LevelDebug
+}
+
+func (h *kafkaCaptureHandler) Handle(_ context.Context, r slog.Record) error {
+	attrs := make(map[string]string)
+	r.Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value.String()
+		return true
+	})
+	h.mu.Lock()
+	h.entries = append(h.entries, kafkaLogEntry{
+		level:   r.Level,
+		message: r.Message,
+		attrs:   attrs,
+	})
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *kafkaCaptureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *kafkaCaptureHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *kafkaCaptureHandler) hasWarn(substr string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, e := range h.entries {
+		if e.level == slog.LevelWarn && strings.Contains(e.message, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *kafkaCaptureHandler) snapshot() []kafkaLogEntry {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]kafkaLogEntry(nil), h.entries...)
+}
+
+func TestWithLogger(t *testing.T) {
+	t.Run("NilLoggerIsSafe", func(t *testing.T) {
+		cluster := kfake.MustCluster(kfake.NumBrokers(1))
+		defer cluster.Close()
+
+		c, err := NewClient(cluster.ListenAddrs(), WithLogger(nil))
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		defer func() { _ = c.Close() }()
+		c.log().Warn("discarded")
+
+		zeroClient := &Client{}
+		zeroClient.log().Warn("discarded")
+	})
+
+	t.Run("PollFetchesLogsFetchError", func(t *testing.T) {
+		ctx := t.Context()
+		handler := &kafkaCaptureHandler{}
+		cluster := kfake.MustCluster(
+			kfake.NumBrokers(1),
+			kfake.SeedTopics(1, "log-fetch-topic"),
+		)
+		defer cluster.Close()
+
+		c, err := NewClient(
+			cluster.ListenAddrs(),
+			WithLogger(slog.New(handler)),
+			WithKafkaOptions(kgo.FetchMaxWait(50*time.Millisecond)),
+		)
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		defer func() { _ = c.Close() }()
+
+		ch, err := c.Subscribe(ctx, "log-fetch-topic")
+		if err != nil {
+			t.Fatalf("Subscribe() error = %v", err)
+		}
+
+		var fetchInjected atomic.Bool
+		cluster.ControlKey(int16(kmsg.Fetch), func(kreq kmsg.Request) (kmsg.Response, error, bool) {
+			if fetchInjected.Swap(true) {
+				return nil, nil, false
+			}
+			req := kreq.(*kmsg.FetchRequest)
+			resp := req.ResponseKind().(*kmsg.FetchResponse)
+			resp.SetVersion(req.GetVersion())
+			topicResp := kmsg.NewFetchResponseTopic()
+			topicResp.Topic = "log-fetch-topic"
+			if len(req.Topics) > 0 {
+				topicResp.TopicID = req.Topics[0].TopicID
+			}
+			partResp := kmsg.NewFetchResponseTopicPartition()
+			partResp.Partition = 0
+			partResp.ErrorCode = kerr.TopicAuthorizationFailed.Code
+			topicResp.Partitions = []kmsg.FetchResponseTopicPartition{partResp}
+			resp.Topics = []kmsg.FetchResponseTopic{topicResp}
+			return resp, nil, true
+		})
+
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if handler.hasWarn("kafka fetch error") {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if !handler.hasWarn("kafka fetch error") {
+			t.Errorf("expected kafka fetch error warn log, got %+v", handler.snapshot())
+		}
+
+		if err := c.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+		for range ch {
+		}
+		assertNoGoroutineLeaks(t)
+	})
+
+	t.Run("StopSubscriptionLogsCommitAndLeaveErrors", func(t *testing.T) {
+		ctx := t.Context()
+		handler := &kafkaCaptureHandler{}
+		cluster := kfake.MustCluster(
+			kfake.NumBrokers(1),
+			kfake.SeedTopics(1, "log-commit-topic"),
+		)
+		defer cluster.Close()
+
+		c, err := NewClient(
+			cluster.ListenAddrs(),
+			WithConsumerGroup("log-cg"),
+			WithLogger(slog.New(handler)),
+		)
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		defer func() { _ = c.Close() }()
+
+		ch, err := c.Subscribe(ctx, "log-commit-topic")
+		if err != nil {
+			t.Fatalf("Subscribe() error = %v", err)
+		}
+
+		if err := c.Publish(ctx, "log-commit-topic", []byte("one")); err != nil {
+			t.Fatalf("Publish() error = %v", err)
+		}
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for message")
+		}
+
+		// Grab entry and stop with an already-canceled context so CommitMarkedOffsets
+		// and LeaveGroupContext both fail and emit structured warn logs.
+		c.mu.Lock()
+		entry := c.subscriptions["log-commit-topic"]
+		delete(c.subscriptions, "log-commit-topic")
+		c.mu.Unlock()
+
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+		c.stopSubscription(canceledCtx, entry, true)
+		for range ch {
+		}
+
+		if !handler.hasWarn("kafka commit marked offsets failed") {
+			t.Errorf("expected commit marked offsets warn log, got %+v", handler.entries)
+		}
+		if !handler.hasWarn("kafka leave group failed") {
+			t.Errorf("expected leave group warn log, got %+v", handler.entries)
+		}
+
+		if err := c.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+		assertNoGoroutineLeaks(t)
+	})
+}
+
 // Compile-time structural check that Client satisfies memorystore.PubSubClient.
 type pubSubContract interface {
 	Subscribe(ctx context.Context, topic string) (<-chan []byte, error)
@@ -2257,3 +2449,270 @@ type pubSubContract interface {
 }
 
 var _ pubSubContract = (*Client)(nil)
+
+func TestClient_ConsumerGroupGreedyAutoCommitAndCancelCommitLog(t *testing.T) {
+	ctx := t.Context()
+	handler := &kafkaCaptureHandler{}
+	cluster := kfake.MustCluster(
+		kfake.NumBrokers(1),
+		kfake.SeedTopics(1, "greedy-cg-topic"),
+	)
+	defer cluster.Close()
+
+	pub, err := NewClient(cluster.ListenAddrs())
+	if err != nil {
+		t.Fatalf("NewClient(pub) error = %v", err)
+	}
+	defer func() { _ = pub.Close() }()
+
+	c, err := NewClient(
+		cluster.ListenAddrs(),
+		WithConsumerGroup("greedy-cg"),
+		WithLogger(slog.New(handler)),
+		WithKafkaOptions(kgo.GreedyAutoCommit()),
+	)
+	if err != nil {
+		t.Fatalf("NewClient(greedy) error = %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	ch, err := c.Subscribe(ctx, "greedy-cg-topic")
+	if err != nil {
+		t.Fatalf("Subscribe() error = %v", err)
+	}
+	if err := pub.Publish(ctx, "greedy-cg-topic", []byte("greedy-msg")); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for greedy-msg")
+	}
+
+	c.mu.Lock()
+	entry := c.subscriptions["greedy-cg-topic"]
+	delete(c.subscriptions, "greedy-cg-topic")
+	c.mu.Unlock()
+
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	c.stopSubscription(canceledCtx, entry, true)
+	for range ch {
+	}
+
+	if !handler.hasWarn("kafka commit uncommitted offsets failed") {
+		t.Errorf("expected commit uncommitted offsets warn log, got %+v", handler.snapshot())
+	}
+	assertNoGoroutineLeaks(t)
+}
+
+func TestClient_MetadataOffsetsAndStandbyErrorBranches(t *testing.T) {
+	ctx := t.Context()
+
+	t.Run("MetadataAndListOffsetsRetryThenFailAndCancel", func(t *testing.T) {
+		cluster := kfake.MustCluster(
+			kfake.NumBrokers(1),
+			kfake.SeedTopics(1, "retry-meta-topic"),
+		)
+		defer cluster.Close()
+
+		c, err := NewClient(cluster.ListenAddrs(), WithLogger(slog.New(&kafkaCaptureHandler{})))
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		defer func() { _ = c.Close() }()
+
+		// 1. Metadata retryable LeaderNotAvailable followed by success.
+		var metaInjected atomic.Bool
+		cluster.ControlKey(int16(kmsg.Metadata), func(kreq kmsg.Request) (kmsg.Response, error, bool) {
+			if metaInjected.Swap(true) {
+				return nil, nil, false
+			}
+			req := kreq.(*kmsg.MetadataRequest)
+			resp := req.ResponseKind().(*kmsg.MetadataResponse)
+			tr := kmsg.NewMetadataResponseTopic()
+			name := "retry-meta-topic"
+			tr.Topic = &name
+			tr.ErrorCode = kerr.LeaderNotAvailable.Code
+			resp.Topics = []kmsg.MetadataResponseTopic{tr}
+			return resp, nil, true
+		})
+		leaders, err := c.fetchTopicPartitions(ctx, "retry-meta-topic")
+		if err != nil || len(leaders) != 1 {
+			t.Fatalf("fetchTopicPartitions(retry) = (%v, %v), want 1 partition", leaders, err)
+		}
+
+		// 2. ListOffsets retryable LeaderNotAvailable followed by success.
+		var offInjected atomic.Bool
+		cluster.ControlKey(int16(kmsg.ListOffsets), func(kreq kmsg.Request) (kmsg.Response, error, bool) {
+			if offInjected.Swap(true) {
+				return nil, nil, false
+			}
+			req := kreq.(*kmsg.ListOffsetsRequest)
+			resp := req.ResponseKind().(*kmsg.ListOffsetsResponse)
+			tr := kmsg.NewListOffsetsResponseTopic()
+			tr.Topic = "retry-meta-topic"
+			pr := kmsg.NewListOffsetsResponseTopicPartition()
+			pr.Partition = 0
+			pr.ErrorCode = kerr.LeaderNotAvailable.Code
+			tr.Partitions = []kmsg.ListOffsetsResponseTopicPartition{pr}
+			resp.Topics = []kmsg.ListOffsetsResponseTopic{tr}
+			return resp, nil, true
+		})
+		offsets, err := c.fetchEndOffsets(ctx, "retry-meta-topic", leaders)
+		if err != nil || len(offsets) != 1 {
+			t.Fatalf("fetchEndOffsets(retry) = (%v, %v), want 1 offset", offsets, err)
+		}
+
+		// 3. Non-retryable ListOffsets error returns immediately.
+		cluster.ControlKey(int16(kmsg.ListOffsets), func(kreq kmsg.Request) (kmsg.Response, error, bool) {
+			req := kreq.(*kmsg.ListOffsetsRequest)
+			resp := req.ResponseKind().(*kmsg.ListOffsetsResponse)
+			tr := kmsg.NewListOffsetsResponseTopic()
+			tr.Topic = "retry-meta-topic"
+			pr := kmsg.NewListOffsetsResponseTopicPartition()
+			pr.Partition = 0
+			pr.ErrorCode = kerr.TopicAuthorizationFailed.Code
+			tr.Partitions = []kmsg.ListOffsetsResponseTopicPartition{pr}
+			resp.Topics = []kmsg.ListOffsetsResponseTopic{tr}
+			return resp, nil, true
+		})
+		if _, err := c.fetchEndOffsets(ctx, "retry-meta-topic", leaders); !errors.Is(err, kerr.TopicAuthorizationFailed) {
+			t.Fatalf("fetchEndOffsets(non-retryable) = %v, want TopicAuthorizationFailed", err)
+		}
+
+		// 4. Context canceled during ListOffsets retry sleep.
+		cluster.ControlKey(int16(kmsg.ListOffsets), func(kreq kmsg.Request) (kmsg.Response, error, bool) {
+			cluster.KeepControl()
+			req := kreq.(*kmsg.ListOffsetsRequest)
+			resp := req.ResponseKind().(*kmsg.ListOffsetsResponse)
+			tr := kmsg.NewListOffsetsResponseTopic()
+			tr.Topic = "retry-meta-topic"
+			pr := kmsg.NewListOffsetsResponseTopicPartition()
+			pr.Partition = 0
+			pr.ErrorCode = kerr.LeaderNotAvailable.Code
+			tr.Partitions = []kmsg.ListOffsetsResponseTopicPartition{pr}
+			resp.Topics = []kmsg.ListOffsetsResponseTopic{tr}
+			return resp, nil, true
+		})
+		shortCtx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+		defer cancel()
+		if _, err := c.fetchEndOffsets(shortCtx, "retry-meta-topic", leaders); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("fetchEndOffsets(timeout) = %v, want DeadlineExceeded", err)
+		}
+
+		// 5. Context canceled during Metadata retry sleep.
+		cluster.ControlKey(int16(kmsg.Metadata), func(kreq kmsg.Request) (kmsg.Response, error, bool) {
+			cluster.KeepControl()
+			req := kreq.(*kmsg.MetadataRequest)
+			resp := req.ResponseKind().(*kmsg.MetadataResponse)
+			tr := kmsg.NewMetadataResponseTopic()
+			name := "retry-meta-topic"
+			tr.Topic = &name
+			tr.ErrorCode = kerr.LeaderNotAvailable.Code
+			resp.Topics = []kmsg.MetadataResponseTopic{tr}
+			return resp, nil, true
+		})
+		shortMetaCtx, cancelMeta := context.WithTimeout(ctx, 20*time.Millisecond)
+		defer cancelMeta()
+		if _, err := c.fetchTopicPartitions(shortMetaCtx, "retry-meta-topic"); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("fetchTopicPartitions(timeout) = %v, want DeadlineExceeded", err)
+		}
+	})
+
+	t.Run("StandbyConfirmed848AndReadinessBranches", func(t *testing.T) {
+		cluster := kfake.MustCluster(
+			kfake.NumBrokers(1),
+			kfake.SeedTopics(1, "standby-topic"),
+		)
+		defer cluster.Close()
+
+		c, err := NewClient(cluster.ListenAddrs(), WithLogger(slog.New(&kafkaCaptureHandler{})))
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		defer func() { _ = c.Close() }()
+
+		// 1. DescribeGroups GroupIDNotFound -> ConsumerGroupDescribe (KIP-848) Stable confirmed.
+		var descMode atomic.Int32 // 0: GroupIDNotFound, 1: GroupAuthorizationFailed, 2: Dead
+		cluster.ControlKey(int16(kmsg.DescribeGroups), func(kreq kmsg.Request) (kmsg.Response, error, bool) {
+			cluster.KeepControl()
+			req := kreq.(*kmsg.DescribeGroupsRequest)
+			resp := req.ResponseKind().(*kmsg.DescribeGroupsResponse)
+			g := kmsg.NewDescribeGroupsResponseGroup()
+			g.Group = "cg-848"
+			switch descMode.Load() {
+			case 0:
+				g.ErrorCode = kerr.GroupIDNotFound.Code
+			case 1:
+				g.ErrorCode = kerr.GroupAuthorizationFailed.Code
+			default:
+				g.State = "Dead"
+			}
+			resp.Groups = []kmsg.DescribeGroupsResponseGroup{g}
+			return resp, nil, true
+		})
+		cluster.ControlKey(int16(kmsg.ConsumerGroupDescribe), func(kreq kmsg.Request) (kmsg.Response, error, bool) {
+			cluster.KeepControl()
+			req := kreq.(*kmsg.ConsumerGroupDescribeRequest)
+			resp := req.ResponseKind().(*kmsg.ConsumerGroupDescribeResponse)
+			g := kmsg.NewConsumerGroupDescribeResponseGroup()
+			g.Group = "cg-848"
+			g.State = "Stable"
+			m := kmsg.NewConsumerGroupDescribeResponseGroupMember()
+			tp := kmsg.NewAssignmentTopicPartition()
+			tp.Topic = "standby-topic"
+			tp.Partitions = []int32{0}
+			m.Assignment.TopicPartitions = []kmsg.AssignmentTopicPartition{tp}
+			g.Members = []kmsg.ConsumerGroupDescribeResponseGroupMember{m}
+			resp.Groups = []kmsg.ConsumerGroupDescribeResponseGroup{g}
+			return resp, nil, true
+		})
+
+		gr := newGroupReadiness("standby-topic", "cg-848", c.producer, ctx, map[int32]int32{0: 0}, c.log())
+		if !gr.isStandbyConfirmed() {
+			t.Fatal("expected isStandbyConfirmed() == true via KIP-848 ConsumerGroupDescribe")
+		}
+		// Trigger onAssigned(empty) -> standby markReady -> subsequent onAssigned returns early.
+		gr.onAssigned(nil)
+		gr.onAssigned(nil)
+		select {
+		case <-gr.readyCh:
+		default:
+			t.Fatal("expected readyCh to be closed after standby confirmation")
+		}
+
+		// 2. Non-retriable DescribeGroups error -> false.
+		descMode.Store(1)
+		if gr.isStandbyConfirmed() {
+			t.Fatal("expected isStandbyConfirmed() == false on GroupAuthorizationFailed")
+		}
+
+		// 3. Dead DescribeGroups state -> false.
+		descMode.Store(2)
+		if gr.isStandbyConfirmed() {
+			t.Fatal("expected isStandbyConfirmed() == false on Dead state")
+		}
+
+		// 4. checkReadyLocked with empty neededLeaders and fetchedBrokers > 0.
+		gr2 := newGroupReadiness("standby-topic", "cg-empty", c.producer, ctx, map[int32]int32{}, nil)
+		gr2.assignedOnce = true
+		gr2.fetchedBrokers[0] = struct{}{}
+		gr2.checkReadyLocked()
+		select {
+		case <-gr2.readyCh:
+		default:
+			t.Fatal("expected readyCh closed when neededLeaders is empty and fetchedBrokers non-empty")
+		}
+
+		// 5. Transient group states helper coverage.
+		for _, st := range []string{"PreparingRebalance", "CompletingRebalance", "Assigning", "Reconciling"} {
+			if !isTransientGroupState(st) {
+				t.Errorf("isTransientGroupState(%q) = false, want true", st)
+			}
+		}
+		if isTransientGroupState("Dead") {
+			t.Error("isTransientGroupState(Dead) = true, want false")
+		}
+	})
+}

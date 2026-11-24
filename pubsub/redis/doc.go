@@ -17,9 +17,10 @@
 // existing caller-managed redis.UniversalClient; in that mode Close leaves the
 // injected client open by default so it can be shared with other components.
 //
-// Both defaults can be overridden with WithCloseClient, and the buffer size of
+// Both defaults can be overridden with WithCloseClient, the buffer size of
 // channels returned by Subscribe can be configured with WithChannelBuffer
-// (default 100).
+// (default 100), and structured background/cleanup logging can be enabled with
+// WithLogger.
 //
 // # Wildcard Pattern Routing
 //
@@ -33,4 +34,11 @@
 // "user:123:profile", and "?" / "[abc]" act as single-character and
 // character-class globs), whereas InMemoryPubSub restricts '*' to matching a
 // single ':'-delimited segment.
+//
+// # Test Dependencies
+//
+// This module's go.mod requires github.com/alicebob/miniredis/v2 solely for
+// offline unit tests (*_test.go). Under Go 1.27's pruned module graph,
+// miniredis/v2 is excluded from production builds (go list -deps .) and from
+// downstream consumers' go.mod require lists.
 package redis

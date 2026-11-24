@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"log/slog"
 	"math/rand/v2"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -24,7 +26,10 @@ const (
 	streamLockStripes       = 64
 )
 
-var processStreamLocks [streamLockStripes]sync.Mutex
+var (
+	processStreamLocks [streamLockStripes]sync.Mutex
+	discardLogger      = slog.New(slog.DiscardHandler)
+)
 
 // Common errors returned by the NATS Pub/Sub client.
 var (
@@ -43,6 +48,7 @@ type Client struct {
 	js            jetstream.JetStream
 	cfg           config
 	closeConn     bool
+	dropped       atomic.Int64
 	mu            sync.RWMutex
 	streamMu      sync.Mutex
 	subscriptions map[string]*natsSubscription
@@ -113,6 +119,9 @@ func NewClientFromConn(conn *nats.Conn, opts ...Option) (*Client, error) {
 }
 
 func newClient(conn *nats.Conn, cfg config, defaultCloseConn bool) (*Client, error) {
+	if cfg.logger == nil {
+		cfg.logger = discardLogger
+	}
 	var js jetstream.JetStream
 	if cfg.jetStreamEnabled {
 		var err error
@@ -129,6 +138,19 @@ func newClient(conn *nats.Conn, cfg config, defaultCloseConn bool) (*Client, err
 		closeConn:     cfg.resolveCloseConn(defaultCloseConn),
 		subscriptions: make(map[string]*natsSubscription),
 	}, nil
+}
+
+func (c *Client) log() *slog.Logger {
+	if c.cfg.logger != nil {
+		return c.cfg.logger
+	}
+	return discardLogger
+}
+
+// DroppedCount returns the total number of Core NATS messages dropped because
+// a subscriber's delivery channel buffer was full.
+func (c *Client) DroppedCount() int64 {
+	return c.dropped.Load()
 }
 
 func validateConfig(cfg config) error {
@@ -388,6 +410,7 @@ func (c *Client) ensureStream(ctx context.Context, topic string) (jetstream.Stre
 				if err != nil {
 					lastErr = err
 					if isRetryableStreamErr(err) && attempt < ensureStreamMaxAttempts-1 {
+						c.log().Warn("retrying jetstream ensureStream", "stream", c.cfg.streamName, "topic", topic, "attempt", attempt+1, "err", lastErr)
 						if waitErr := waitEnsureStreamJitter(ctx); waitErr != nil {
 							return nil, waitErr
 						}
@@ -408,6 +431,7 @@ func (c *Client) ensureStream(ctx context.Context, topic string) (jetstream.Stre
 			if updateErr != nil {
 				lastErr = updateErr
 				if isRetryableStreamErr(updateErr) && attempt < ensureStreamMaxAttempts-1 {
+					c.log().Warn("retrying jetstream ensureStream", "stream", c.cfg.streamName, "topic", topic, "attempt", attempt+1, "err", lastErr)
 					if waitErr := waitEnsureStreamJitter(ctx); waitErr != nil {
 						return nil, waitErr
 					}
@@ -423,11 +447,13 @@ func (c *Client) ensureStream(ctx context.Context, topic string) (jetstream.Stre
 				}
 				lastErr = verifyErr
 				if attempt < ensureStreamMaxAttempts-1 {
+					c.log().Warn("retrying jetstream ensureStream", "stream", c.cfg.streamName, "topic", topic, "attempt", attempt+1, "err", lastErr)
 					if waitErr := waitEnsureStreamJitter(ctx); waitErr != nil {
 						return nil, waitErr
 					}
 					continue
 				}
+				c.log().Warn("jetstream ensureStream verification lookup failed", "stream", c.cfg.streamName, "topic", topic, "err", verifyErr)
 				return updatedStream, nil
 			}
 			if verifiedInfo := verifiedStream.CachedInfo(); verifiedInfo == nil || streamCoversSubject(verifiedInfo.Config.Subjects, topic) {
@@ -435,6 +461,7 @@ func (c *Client) ensureStream(ctx context.Context, topic string) (jetstream.Stre
 			}
 			lastErr = fmt.Errorf("jetstream stream %q subject %q overwritten concurrently", c.cfg.streamName, topic)
 			if attempt < ensureStreamMaxAttempts-1 {
+				c.log().Warn("retrying jetstream ensureStream", "stream", c.cfg.streamName, "topic", topic, "attempt", attempt+1, "err", lastErr)
 				if waitErr := waitEnsureStreamJitter(ctx); waitErr != nil {
 					return nil, waitErr
 				}
@@ -459,6 +486,7 @@ func (c *Client) ensureStream(ctx context.Context, topic string) (jetstream.Stre
 			if createErr != nil {
 				lastErr = createErr
 				if isRetryableStreamErr(createErr) && attempt < ensureStreamMaxAttempts-1 {
+					c.log().Warn("retrying jetstream ensureStream", "stream", c.cfg.streamName, "topic", topic, "attempt", attempt+1, "err", lastErr)
 					if waitErr := waitEnsureStreamJitter(ctx); waitErr != nil {
 						return nil, waitErr
 					}
@@ -473,11 +501,13 @@ func (c *Client) ensureStream(ctx context.Context, topic string) (jetstream.Stre
 				}
 				lastErr = verifyErr
 				if attempt < ensureStreamMaxAttempts-1 {
+					c.log().Warn("retrying jetstream ensureStream", "stream", c.cfg.streamName, "topic", topic, "attempt", attempt+1, "err", lastErr)
 					if waitErr := waitEnsureStreamJitter(ctx); waitErr != nil {
 						return nil, waitErr
 					}
 					continue
 				}
+				c.log().Warn("jetstream ensureStream verification lookup failed", "stream", c.cfg.streamName, "topic", topic, "err", verifyErr)
 				return createdStream, nil
 			}
 			if verifiedInfo := verifiedStream.CachedInfo(); verifiedInfo == nil || streamCoversSubject(verifiedInfo.Config.Subjects, topic) {
@@ -485,6 +515,7 @@ func (c *Client) ensureStream(ctx context.Context, topic string) (jetstream.Stre
 			}
 			lastErr = fmt.Errorf("jetstream stream %q subject %q overwritten concurrently", c.cfg.streamName, topic)
 			if attempt < ensureStreamMaxAttempts-1 {
+				c.log().Warn("retrying jetstream ensureStream", "stream", c.cfg.streamName, "topic", topic, "attempt", attempt+1, "err", lastErr)
 				if waitErr := waitEnsureStreamJitter(ctx); waitErr != nil {
 					return nil, waitErr
 				}
@@ -513,7 +544,11 @@ func (c *Client) setupCoreSubscription(ctx context.Context, topic string) (*nats
 		return nil, err
 	}
 	if err := c.flushWithContext(ctx); err != nil {
-		_ = sub.Unsubscribe()
+		if unsubErr := sub.Unsubscribe(); unsubErr != nil &&
+			!errors.Is(unsubErr, nats.ErrBadSubscription) &&
+			!errors.Is(unsubErr, nats.ErrConnectionClosed) {
+			c.log().Warn("nats unsubscribe failed after flush error", "topic", topic, "err", unsubErr)
+		}
 		return nil, err
 	}
 	return sub, nil
@@ -609,7 +644,7 @@ func (c *Client) Subscribe(ctx context.Context, topic string) (<-chan []byte, er
 		c.mu.Lock()
 		if c.closed {
 			c.mu.Unlock()
-			cleanupPendingSub(pendingSub, pendingMsgsCtx)
+			cleanupPendingSub(pendingSub, pendingMsgsCtx, c.log())
 			return nil, ErrClosed
 		}
 		prev := c.subscriptions[topic]
@@ -632,11 +667,11 @@ func (c *Client) Subscribe(ctx context.Context, topic string) (<-chan []byte, er
 
 	if pendingMsgsCtx != nil {
 		entry.wg.Go(func() {
-			runJetStreamLoop(recvCtx, pendingMsgsCtx, ackExplicit, ch)
+			runJetStreamLoop(recvCtx, topic, pendingMsgsCtx, ackExplicit, ch, c.log())
 		})
 	} else {
 		entry.wg.Go(func() {
-			runCoreLoop(recvCtx, pendingSub, ch)
+			runCoreLoop(recvCtx, topic, pendingSub, ch, &c.dropped, c.log())
 		})
 	}
 
@@ -646,34 +681,72 @@ func (c *Client) Subscribe(ctx context.Context, topic string) (<-chan []byte, er
 	return ch, nil
 }
 
-func cleanupPendingSub(sub *nats.Subscription, msgsCtx jetstream.MessagesContext) {
+func cleanupPendingSub(sub *nats.Subscription, msgsCtx jetstream.MessagesContext, logger *slog.Logger) {
+	if logger == nil {
+		logger = discardLogger
+	}
 	if sub != nil {
-		_ = sub.Unsubscribe()
+		if err := sub.Unsubscribe(); err != nil &&
+			!errors.Is(err, nats.ErrBadSubscription) &&
+			!errors.Is(err, nats.ErrConnectionClosed) {
+			logger.Warn("nats unsubscribe failed during pending cleanup", "err", err)
+		}
 	}
 	if msgsCtx != nil {
 		msgsCtx.Stop()
 	}
 }
 
-func runCoreLoop(recvCtx context.Context, sub *nats.Subscription, outCh chan<- []byte) {
+func runCoreLoop(
+	recvCtx context.Context,
+	topic string,
+	sub *nats.Subscription,
+	outCh chan<- []byte,
+	dropped *atomic.Int64,
+	logger *slog.Logger,
+) {
+	if logger == nil {
+		logger = discardLogger
+	}
 	defer close(outCh)
 	for {
 		msg, err := sub.NextMsgWithContext(recvCtx)
 		if err != nil {
 			if errors.Is(err, nats.ErrSlowConsumer) {
+				logger.Warn("core nats slow consumer", "topic", topic, "err", err)
 				continue
+			}
+			if recvCtx.Err() == nil &&
+				!errors.Is(err, context.Canceled) &&
+				!errors.Is(err, nats.ErrConnectionClosed) &&
+				!errors.Is(err, nats.ErrBadSubscription) {
+				logger.Warn("core nats receive loop stopped", "topic", topic, "err", err)
 			}
 			return
 		}
 		select {
 		case outCh <- msg.Data:
 		default:
-			// Drop when slow subscriber buffer is full, matching InMemoryPubSub.
+			var n int64
+			if dropped != nil {
+				n = dropped.Add(1)
+			}
+			logger.Warn("core nats subscriber buffer full; dropping message", "topic", topic, "dropped_count", n)
 		}
 	}
 }
 
-func runJetStreamLoop(recvCtx context.Context, msgsCtx jetstream.MessagesContext, ackExplicit bool, outCh chan<- []byte) {
+func runJetStreamLoop(
+	recvCtx context.Context,
+	topic string,
+	msgsCtx jetstream.MessagesContext,
+	ackExplicit bool,
+	outCh chan<- []byte,
+	logger *slog.Logger,
+) {
+	if logger == nil {
+		logger = discardLogger
+	}
 	defer close(outCh)
 	defer msgsCtx.Stop()
 	for {
@@ -688,6 +761,7 @@ func runJetStreamLoop(recvCtx context.Context, msgsCtx jetstream.MessagesContext
 				errors.Is(err, context.Canceled) {
 				return
 			}
+			logger.Warn("jetstream receive error; retrying", "topic", topic, "retry_delay", jsReceiveRetryDelay, "err", err)
 			timer := time.NewTimer(jsReceiveRetryDelay)
 			select {
 			case <-timer.C:
@@ -702,12 +776,16 @@ func runJetStreamLoop(recvCtx context.Context, msgsCtx jetstream.MessagesContext
 		case outCh <- msg.Data():
 			if ackExplicit {
 				ackCtx, ackCancel := context.WithTimeout(context.Background(), defaultCleanupTimeout)
-				_ = msg.DoubleAck(ackCtx)
+				if ackErr := msg.DoubleAck(ackCtx); ackErr != nil {
+					logger.Warn("jetstream double-ack failed", "topic", topic, "err", ackErr)
+				}
 				ackCancel()
 			}
 		case <-recvCtx.Done():
 			if ackExplicit {
-				_ = msg.Nak()
+				if nakErr := msg.Nak(); nakErr != nil {
+					logger.Warn("jetstream nak failed", "topic", topic, "err", nakErr)
+				}
 			}
 			return
 		}
@@ -785,16 +863,37 @@ func (c *Client) stopSubscription(ctx context.Context, entry *natsSubscription) 
 		}
 	}
 
-	if timeout <= 0 || entry.sub.Drain() != nil {
+	if timeout <= 0 {
 		entry.cancel()
-		_ = entry.sub.Unsubscribe()
+		if unsubErr := entry.sub.Unsubscribe(); unsubErr != nil &&
+			!errors.Is(unsubErr, nats.ErrConnectionClosed) &&
+			!errors.Is(unsubErr, nats.ErrBadSubscription) {
+			c.log().Warn("nats subscription unsubscribe failed", "topic", entry.topic, "err", unsubErr)
+		}
+		entry.wg.Wait()
+		return nil
+	}
+	if drainErr := entry.sub.Drain(); drainErr != nil {
+		if !errors.Is(drainErr, nats.ErrConnectionClosed) && !errors.Is(drainErr, nats.ErrBadSubscription) {
+			c.log().Warn("nats subscription drain failed; forcing unsubscribe", "topic", entry.topic, "err", drainErr)
+		}
+		entry.cancel()
+		if unsubErr := entry.sub.Unsubscribe(); unsubErr != nil &&
+			!errors.Is(unsubErr, nats.ErrConnectionClosed) &&
+			!errors.Is(unsubErr, nats.ErrBadSubscription) {
+			c.log().Warn("nats subscription unsubscribe failed", "topic", entry.topic, "err", unsubErr)
+		}
 		entry.wg.Wait()
 		return nil
 	}
 
 	forceStop := func() {
 		entry.cancel()
-		_ = entry.sub.Unsubscribe()
+		if unsubErr := entry.sub.Unsubscribe(); unsubErr != nil &&
+			!errors.Is(unsubErr, nats.ErrConnectionClosed) &&
+			!errors.Is(unsubErr, nats.ErrBadSubscription) {
+			c.log().Warn("nats subscription forced unsubscribe failed", "topic", entry.topic, "err", unsubErr)
+		}
 	}
 	timer := time.AfterFunc(timeout, forceStop)
 	stopCtxWatch := context.AfterFunc(ctx, forceStop)
@@ -857,6 +956,7 @@ func (c *Client) Close() error {
 	select {
 	case <-statusCh:
 	case <-timer.C:
+		c.log().Warn("nats connection drain timed out; forcing close", "timeout", c.cfg.drainTimeout)
 		c.conn.Close()
 	}
 	return nil

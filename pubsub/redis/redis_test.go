@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"runtime/pprof"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1086,3 +1089,458 @@ type pubSubContract interface {
 }
 
 var _ pubSubContract = (*Client)(nil)
+
+type fakePubSubReceiver struct {
+	mu      sync.Mutex
+	results []fakeReceiveResult
+	idx     int
+	blockCh chan struct{}
+}
+
+type fakeReceiveResult struct {
+	msg *redis.Message
+	err error
+}
+
+func (f *fakePubSubReceiver) ReceiveMessage(ctx context.Context) (*redis.Message, error) {
+	f.mu.Lock()
+	if f.idx < len(f.results) {
+		res := f.results[f.idx]
+		f.idx++
+		f.mu.Unlock()
+		return res.msg, res.err
+	}
+	blockCh := f.blockCh
+	f.mu.Unlock()
+
+	if blockCh != nil {
+		select {
+		case <-blockCh:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestReceiveLoop_ExponentialBackoffAndReset(t *testing.T) {
+	simErr := errors.New("redis connection lost")
+	ps := &fakePubSubReceiver{
+		results: []fakeReceiveResult{
+			{err: simErr},
+			{err: simErr},
+			{err: simErr},
+			{err: simErr},
+			{err: simErr},
+			{err: simErr},
+			{err: simErr},
+			{err: simErr},
+			{msg: &redis.Message{Payload: "recovered"}},
+			{err: simErr},
+			{err: simErr},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	ch := make(chan []byte, 4)
+	var delaysMu sync.Mutex
+	var delays []time.Duration
+	reachedBlocking := make(chan struct{})
+	var notifyOnce sync.Once
+
+	waitFn := func(_ context.Context, d time.Duration) bool {
+		delaysMu.Lock()
+		delays = append(delays, d)
+		count := len(delays)
+		delaysMu.Unlock()
+		if count == 10 {
+			notifyOnce.Do(func() { close(reachedBlocking) })
+		}
+		return true
+	}
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		defer close(ch)
+		receiveLoop(ctx, "backoff-topic", ps, ch, waitFn, nil)
+	})
+
+	gotMsg := receiveWithTimeout(t, ch, time.Second)
+	if string(gotMsg) != "recovered" {
+		t.Fatalf("received %q, want %q", string(gotMsg), "recovered")
+	}
+
+	select {
+	case <-reachedBlocking:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for post-reset backoff sequence")
+	}
+
+	cancel()
+	wg.Wait()
+	assertChannelClosed(t, ch, time.Second)
+
+	wantDelays := []time.Duration{
+		100 * time.Millisecond,
+		200 * time.Millisecond,
+		400 * time.Millisecond,
+		800 * time.Millisecond,
+		1600 * time.Millisecond,
+		3200 * time.Millisecond,
+		5 * time.Second,
+		5 * time.Second,
+		100 * time.Millisecond,
+		200 * time.Millisecond,
+	}
+	delaysMu.Lock()
+	gotDelays := slices.Clone(delays)
+	delaysMu.Unlock()
+	if !slices.Equal(gotDelays, wantDelays) {
+		t.Fatalf("backoff delays = %v, want %v", gotDelays, wantDelays)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	if prof := pprof.Lookup("goroutineleak"); prof != nil {
+		var buf bytes.Buffer
+		if err := prof.WriteTo(&buf, 1); err != nil {
+			t.Fatalf("goroutineleak WriteTo() error = %v", err)
+		}
+		if strings.Contains(buf.String(), "github.com/BryceWayne/MemoryStore/pubsub/redis") {
+			t.Errorf("detected leaked goroutine in pubsub/redis:\n%s", buf.String())
+		}
+	}
+}
+
+func TestReceiveLoop_CancelDuringBackoff(t *testing.T) {
+	ps := &fakePubSubReceiver{
+		results: []fakeReceiveResult{
+			{err: errors.New("transient error")},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	ch := make(chan []byte, 1)
+	done := make(chan struct{})
+	start := time.Now()
+
+	go func() {
+		defer close(done)
+		defer close(ch)
+		receiveLoop(ctx, "cancel-backoff-topic", ps, ch, waitRetry, nil)
+	}()
+
+	time.Sleep(15 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(80 * time.Millisecond):
+		t.Fatalf("receiveLoop did not exit promptly after cancel during backoff (elapsed %v)", time.Since(start))
+	}
+	assertChannelClosed(t, ch, time.Second)
+
+	time.Sleep(50 * time.Millisecond)
+	if prof := pprof.Lookup("goroutineleak"); prof != nil {
+		var buf bytes.Buffer
+		if err := prof.WriteTo(&buf, 1); err != nil {
+			t.Fatalf("goroutineleak WriteTo() error = %v", err)
+		}
+		if strings.Contains(buf.String(), "github.com/BryceWayne/MemoryStore/pubsub/redis") {
+			t.Errorf("detected leaked goroutine in pubsub/redis:\n%s", buf.String())
+		}
+	}
+}
+
+type redisLogEntry struct {
+	level   slog.Level
+	message string
+	attrs   map[string]string
+}
+
+type redisCaptureHandler struct {
+	mu      sync.Mutex
+	entries []redisLogEntry
+}
+
+func (h *redisCaptureHandler) Enabled(_ context.Context, lvl slog.Level) bool {
+	return lvl >= slog.LevelDebug
+}
+
+func (h *redisCaptureHandler) Handle(_ context.Context, r slog.Record) error {
+	attrs := make(map[string]string)
+	r.Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value.String()
+		return true
+	})
+	h.mu.Lock()
+	h.entries = append(h.entries, redisLogEntry{
+		level:   r.Level,
+		message: r.Message,
+		attrs:   attrs,
+	})
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *redisCaptureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *redisCaptureHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *redisCaptureHandler) find(lvl slog.Level, substr string) (redisLogEntry, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, e := range h.entries {
+		if e.level == lvl && strings.Contains(e.message, substr) {
+			return e, true
+		}
+	}
+	return redisLogEntry{}, false
+}
+
+func (h *redisCaptureHandler) snapshot() []redisLogEntry {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.entries)
+}
+
+type failWriteConn struct {
+	net.Conn
+	failWrite *atomic.Bool
+	writeErr  error
+}
+
+func (c *failWriteConn) Write(p []byte) (int, error) {
+	if c.failWrite != nil && c.failWrite.Load() {
+		return 0, c.writeErr
+	}
+	return c.Conn.Write(p)
+}
+
+type fakePubSubHandle struct {
+	unsubErr   error
+	punsubErr  error
+	closeErr   error
+	unsubCalls atomic.Int32
+	closeCalls atomic.Int32
+}
+
+func (f *fakePubSubHandle) ReceiveMessage(ctx context.Context) (*redis.Message, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (f *fakePubSubHandle) Unsubscribe(context.Context, ...string) error {
+	f.unsubCalls.Add(1)
+	return f.unsubErr
+}
+
+func (f *fakePubSubHandle) PUnsubscribe(context.Context, ...string) error {
+	f.unsubCalls.Add(1)
+	return f.punsubErr
+}
+
+func (f *fakePubSubHandle) Close() error {
+	f.closeCalls.Add(1)
+	return f.closeErr
+}
+
+func TestWithLogger(t *testing.T) {
+	t.Run("NilLoggerIsSafe", func(t *testing.T) {
+		mr := miniredis.RunT(t)
+		c, err := NewClient(&redis.UniversalOptions{Addrs: []string{mr.Addr()}}, WithLogger(nil))
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		defer func() { _ = c.Close() }()
+		if c.log() == nil {
+			t.Fatal("expected non-nil discard logger")
+		}
+		c.log().Warn("discarded")
+
+		zeroClient := &Client{}
+		zeroClient.log().Warn("discarded")
+	})
+
+	t.Run("ReceiveLoopLogsBackoffAndRecovery", func(t *testing.T) {
+		handler := &redisCaptureHandler{}
+		ps := &fakePubSubReceiver{
+			results: []fakeReceiveResult{
+				{err: errors.New("temporary read failure")},
+				{msg: &redis.Message{Payload: "ok"}},
+			},
+		}
+
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		ch := make(chan []byte, 2)
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			defer close(ch)
+			receiveLoop(ctx, "orders", ps, ch, func(context.Context, time.Duration) bool { return true }, slog.New(handler))
+		})
+
+		got := receiveWithTimeout(t, ch, time.Second)
+		if string(got) != "ok" {
+			t.Fatalf("received %q, want ok", string(got))
+		}
+		cancel()
+		wg.Wait()
+
+		warnEntry, ok := handler.find(slog.LevelWarn, "redis receive failed; retrying with backoff")
+		if !ok {
+			t.Fatalf("expected backoff warn log, got %+v", handler.entries)
+		}
+		if warnEntry.attrs["topic"] != "orders" {
+			t.Errorf("warn topic attr = %q, want orders", warnEntry.attrs["topic"])
+		}
+		if warnEntry.attrs["retry_delay"] == "" || warnEntry.attrs["err"] == "" {
+			t.Errorf("expected retry_delay and err attrs, got %+v", warnEntry.attrs)
+		}
+
+		infoEntry, ok := handler.find(slog.LevelInfo, "redis receive loop recovered")
+		if !ok {
+			t.Fatalf("expected recovery info log, got %+v", handler.entries)
+		}
+		if infoEntry.attrs["topic"] != "orders" {
+			t.Errorf("info topic attr = %q, want orders", infoEntry.attrs["topic"])
+		}
+	})
+
+	t.Run("StopSubscriptionLogsUnsubscribeError", func(t *testing.T) {
+		mr := miniredis.RunT(t)
+		unsubErr := errors.New("injected unsubscribe write failure")
+		closeErr := errors.New("injected pubsub close failure")
+
+		var failWrite atomic.Bool
+
+		newFaultClient := func(handler *redisCaptureHandler) *Client {
+			c, err := NewClient(
+				&redis.UniversalOptions{
+					Addrs: []string{mr.Addr()},
+					Dialer: func(ctx context.Context, network, addr string) (net.Conn, error) {
+						conn, dialErr := (&net.Dialer{}).DialContext(ctx, network, addr)
+						if dialErr != nil {
+							return nil, dialErr
+						}
+						return &failWriteConn{
+							Conn:      conn,
+							failWrite: &failWrite,
+							writeErr:  unsubErr,
+						}, nil
+					},
+				},
+				WithLogger(slog.New(handler)),
+			)
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+			return c
+		}
+
+		ctx := t.Context()
+
+		// 1. Exact topic Unsubscribe write error via real Dialer + *redis.PubSub.
+		exactHandler := &redisCaptureHandler{}
+		cExact := newFaultClient(exactHandler)
+		defer func() { _ = cExact.Close() }()
+
+		chExact, err := cExact.Subscribe(ctx, "disconnect-topic")
+		if err != nil {
+			t.Fatalf("Subscribe(exact) error = %v", err)
+		}
+		failWrite.Store(true)
+		err = cExact.Unsubscribe(ctx, "disconnect-topic")
+		failWrite.Store(false)
+		if err != nil {
+			t.Fatalf("Unsubscribe(exact) error = %v", err)
+		}
+		assertChannelClosed(t, chExact, 2*time.Second)
+
+		exactWarn, ok := exactHandler.find(slog.LevelWarn, "redis unsubscribe failed")
+		if !ok {
+			t.Fatalf("expected warn log on exact unsubscribe error, got %+v", exactHandler.snapshot())
+		}
+		if exactWarn.attrs["topic"] != "disconnect-topic" || exactWarn.attrs["pattern"] != "false" || !strings.Contains(exactWarn.attrs["err"], unsubErr.Error()) {
+			t.Errorf("unexpected exact unsubscribe warn attrs: %+v", exactWarn.attrs)
+		}
+
+		// 2. Pattern topic PUnsubscribe write error via real Dialer + *redis.PubSub.
+		patHandler := &redisCaptureHandler{}
+		cPat := newFaultClient(patHandler)
+		defer func() { _ = cPat.Close() }()
+
+		chPat, err := cPat.Subscribe(ctx, "disconnect-*")
+		if err != nil {
+			t.Fatalf("Subscribe(pattern) error = %v", err)
+		}
+		failWrite.Store(true)
+		err = cPat.Unsubscribe(ctx, "disconnect-*")
+		failWrite.Store(false)
+		if err != nil {
+			t.Fatalf("Unsubscribe(pattern) error = %v", err)
+		}
+		assertChannelClosed(t, chPat, 2*time.Second)
+
+		patWarn, ok := patHandler.find(slog.LevelWarn, "redis unsubscribe failed")
+		if !ok {
+			t.Fatalf("expected warn log on pattern punsubscribe error, got %+v", patHandler.snapshot())
+		}
+		if patWarn.attrs["topic"] != "disconnect-*" || patWarn.attrs["pattern"] != "true" || !strings.Contains(patWarn.attrs["err"], unsubErr.Error()) {
+			t.Errorf("unexpected pattern punsubscribe warn attrs: %+v", patWarn.attrs)
+		}
+
+		// 3. PubSub.Close error in stopSubscription (go-redis standalone Client.pubSub
+		// swallows cn.Close() errors in redis.go, so exercise stopSubscription directly
+		// with a failing pubsubHandle, and verify redis.ErrClosed/context.Canceled suppression).
+		closeHandler := &redisCaptureHandler{}
+		cClose := newClient(redis.NewClient(&redis.Options{Addr: mr.Addr()}), config{
+			channelBuffer: 1,
+			closeClient:   true,
+			logger:        slog.New(closeHandler),
+		})
+		defer func() { _ = cClose.Close() }()
+
+		psErr := &fakePubSubHandle{closeErr: closeErr}
+		_, cancelErr := context.WithCancel(ctx)
+		entryErr := &redisSubscription{
+			topic:  "close-err-topic",
+			ps:     psErr,
+			cancel: cancelErr,
+		}
+		if err := cClose.stopSubscription(ctx, entryErr); err != nil {
+			t.Fatalf("stopSubscription(closeErr) error = %v", err)
+		}
+		closeWarn, ok := closeHandler.find(slog.LevelWarn, "redis pubsub close failed")
+		if !ok {
+			t.Fatalf("expected warn log on pubsub close error, got %+v", closeHandler.snapshot())
+		}
+		if closeWarn.attrs["topic"] != "close-err-topic" || !strings.Contains(closeWarn.attrs["err"], closeErr.Error()) {
+			t.Errorf("unexpected pubsub close warn attrs: %+v", closeWarn.attrs)
+		}
+
+		suppressedHandler := &redisCaptureHandler{}
+		cSuppressed := newClient(redis.NewClient(&redis.Options{Addr: mr.Addr()}), config{
+			channelBuffer: 1,
+			closeClient:   true,
+			logger:        slog.New(suppressedHandler),
+		})
+		defer func() { _ = cSuppressed.Close() }()
+
+		_, cancelSup := context.WithCancel(ctx)
+		entrySup := &redisSubscription{
+			topic:  "suppressed-topic",
+			ps:     &fakePubSubHandle{unsubErr: redis.ErrClosed, closeErr: redis.ErrClosed},
+			cancel: cancelSup,
+		}
+		if err := cSuppressed.stopSubscription(ctx, entrySup); err != nil {
+			t.Fatalf("stopSubscription(suppressed) error = %v", err)
+		}
+		if entries := suppressedHandler.snapshot(); len(entries) != 0 {
+			t.Errorf("expected redis.ErrClosed errors to be suppressed, got %+v", entries)
+		}
+	})
+}

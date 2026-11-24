@@ -28,10 +28,19 @@
 // WithKafkaOptions; producer-only, consumer-only, and group-only options are
 // automatically routed to the appropriate underlying kgo clients.
 //
-// # Topic Provisioning
+// # Topic Provisioning & Observability
 //
 // Automatic topic creation in metadata requests is enabled by default
 // (matching brokers configured with auto.create.topics.enable=true). For
 // clusters with pre-provisioned topics or strict ACLs, pass
-// WithAutoCreateTopics(false).
+// WithAutoCreateTopics(false). Use WithLogger to capture structured warnings
+// for background fetch, offset commit, consumer group leave, and producer flush
+// errors.
+//
+// # Test Dependencies
+//
+// This module's go.mod requires github.com/twmb/franz-go/pkg/kfake solely for
+// offline unit tests (*_test.go). Under Go 1.27's pruned module graph, kfake
+// is excluded from production builds (go list -deps .) and from downstream
+// consumers' go.mod require lists.
 package kafka

@@ -62,7 +62,10 @@ func TestMemoryStore_Subscribe(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ms := NewMemoryStore()
+			ms, err := New()
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
 			defer func() {
 				_ = ms.Stop()
 			}()
@@ -117,7 +120,10 @@ func TestMemoryStore_Subscribe(t *testing.T) {
 
 // TestMemoryStore_Unsubscribe tests unsubscription functionality
 func TestMemoryStore_Unsubscribe(t *testing.T) {
-	ms := NewMemoryStore()
+	ms, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	defer func() {
 		_ = ms.Stop()
 	}()
@@ -152,7 +158,10 @@ func TestMemoryStore_Unsubscribe(t *testing.T) {
 
 // TestMemoryStore_MultipleSubscribers tests multiple subscribers to the same pattern
 func TestMemoryStore_MultipleSubscribers(t *testing.T) {
-	ms := NewMemoryStore()
+	ms, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	defer func() {
 		_ = ms.Stop()
 	}()
@@ -202,7 +211,7 @@ func TestMemoryStore_MultipleSubscribers(t *testing.T) {
 	}
 
 	// Publish message
-	err := ms.Publish("test:123", message)
+	err = ms.Publish("test:123", message)
 	if err != nil {
 		t.Fatalf("Publish() error = %v", err)
 	}
@@ -227,7 +236,10 @@ func TestMemoryStore_MultipleSubscribers(t *testing.T) {
 }
 
 func TestMemoryStore_PubSub_Concurrent(t *testing.T) {
-	ms := NewMemoryStore()
+	ms, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	defer func() {
 		_ = ms.Stop()
 	}()
@@ -326,7 +338,10 @@ func TestMemoryStore_PubSub_Concurrent(t *testing.T) {
 
 // BenchmarkMemoryStore_PubSub benchmarks publish/subscribe operations
 func BenchmarkMemoryStore_PubSub(b *testing.B) {
-	ms := NewMemoryStore()
+	ms, err := New()
+	if err != nil {
+		b.Fatalf("New() error = %v", err)
+	}
 	defer func() {
 		_ = ms.Stop()
 	}()

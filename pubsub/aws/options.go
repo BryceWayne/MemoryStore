@@ -1,6 +1,8 @@
 package aws
 
 import (
+	"log/slog"
+
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 )
@@ -15,6 +17,7 @@ const (
 
 type config struct {
 	queueURL            string
+	queueURLFunc        func(topic string) string
 	topicARN            string
 	autoManage          bool
 	autoManageSet       bool
@@ -23,6 +26,7 @@ type config struct {
 	channelBuffer       int
 	snsOptions          []func(*sns.Options)
 	sqsOptions          []func(*sqs.Options)
+	logger              *slog.Logger
 }
 
 func defaultConfig() config {
@@ -38,9 +42,9 @@ func (c config) shouldAutoManage() bool {
 	if c.autoManageSet {
 		return c.autoManage
 	}
-	// When a caller provides a static pre-provisioned SQS queue URL,
+	// When a caller provides a pre-provisioned SQS queue URL or resolver func,
 	// default to non-managing mode so least-privilege IAM roles work out of the box.
-	return c.queueURL == ""
+	return c.queueURL == "" && c.queueURLFunc == nil
 }
 
 // Option configures a Client created by NewClient.
@@ -73,6 +77,25 @@ func WithAutoManage(enabled bool) Option {
 func WithQueueURL(url string) Option {
 	return func(c *config) {
 		c.queueURL = url
+	}
+}
+
+// WithQueueURLFunc configures a custom function that resolves the SQS queue URL
+// for a given topic. When set, it takes precedence over WithQueueURL and
+// automatically disables dynamic resource management unless overridden by
+// WithAutoManage(true).
+func WithQueueURLFunc(fn func(topic string) string) Option {
+	return func(c *config) {
+		c.queueURLFunc = fn
+	}
+}
+
+// WithLogger sets an optional structured logger for background receive, delete,
+// base64 payload decode, slow-consumer, and cleanup warnings. Nil loggers
+// disable logging.
+func WithLogger(l *slog.Logger) Option {
+	return func(c *config) {
+		c.logger = l
 	}
 }
 

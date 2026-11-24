@@ -1,6 +1,7 @@
 package nats
 
 import (
+	"log/slog"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -27,6 +28,7 @@ type config struct {
 	jsAutoCreate     bool
 	jsStorageSet     bool
 	jsStorage        jetstream.StorageType
+	logger           *slog.Logger
 }
 
 func defaultConfig() config {
@@ -34,6 +36,7 @@ func defaultConfig() config {
 		channelBuffer: defaultChannelBuffer,
 		drainTimeout:  defaultDrainTimeout,
 		jsAutoCreate:  true,
+		logger:        slog.New(slog.DiscardHandler),
 	}
 }
 
@@ -144,5 +147,16 @@ func WithJetStreamStorage(storage jetstream.StorageType) Option {
 	return func(c *config) {
 		c.jsStorageSet = true
 		c.jsStorage = storage
+	}
+}
+
+// WithLogger sets a structured logger for slow-consumer drops, background
+// receive retries, JetStream ack/nak errors, and subscription drain warnings.
+// Nil loggers are ignored, preserving the default discard logger.
+func WithLogger(l *slog.Logger) Option {
+	return func(c *config) {
+		if l != nil {
+			c.logger = l
+		}
 	}
 }

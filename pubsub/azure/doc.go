@@ -24,5 +24,6 @@
 // Close. For least-privilege RBAC environments (Data Sender / Data Receiver
 // without namespace management permissions), configure a pre-provisioned
 // subscription using WithSubscriptionName or WithSubscriptionNameFunc together
-// with WithAutoManage(false).
+// with WithAutoManage(false). Use WithLogger to capture structured warnings for
+// transient receive, settlement, slow-consumer, and cleanup errors.
 package azure

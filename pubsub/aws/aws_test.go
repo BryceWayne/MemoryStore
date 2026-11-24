@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -187,6 +188,7 @@ type fakeSQSState struct {
 	getAttrErr      error
 	setAttrErr      error
 	deleteQueueErr  error
+	deleteMsgErr    error
 	receiptSeq      atomic.Int64
 }
 
@@ -333,6 +335,9 @@ func (q *fakeSQSState) ReceiveMessage(ctx context.Context, params *sqs.ReceiveMe
 func (q *fakeSQSState) DeleteMessage(_ context.Context, params *sqs.DeleteMessageInput, _ ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if q.deleteMsgErr != nil {
+		return nil, q.deleteMsgErr
+	}
 	q.deletedHandles = append(q.deletedHandles, aws.ToString(params.ReceiptHandle))
 	return &sqs.DeleteMessageOutput{}, nil
 }
@@ -1785,6 +1790,307 @@ func TestClient_ConcurrentLifecycleAndGoroutineLeaks(t *testing.T) {
 			t.Errorf("Publish(sns.Publish error) = %v, want wrapped sns publish boom", err)
 		}
 		_ = cPubErr.Close()
+		assertNoGoroutineLeaks(t)
+	})
+}
+
+type awsLogEntry struct {
+	level   slog.Level
+	message string
+}
+
+type awsCaptureHandler struct {
+	mu      sync.Mutex
+	entries []awsLogEntry
+}
+
+func (h *awsCaptureHandler) Enabled(_ context.Context, lvl slog.Level) bool {
+	return lvl >= slog.LevelDebug
+}
+
+func (h *awsCaptureHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	h.entries = append(h.entries, awsLogEntry{
+		level:   r.Level,
+		message: r.Message,
+	})
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *awsCaptureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *awsCaptureHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *awsCaptureHandler) hasWarn(substr string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, e := range h.entries {
+		if e.level == slog.LevelWarn && strings.Contains(e.message, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *awsCaptureHandler) snapshot() []awsLogEntry {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]awsLogEntry(nil), h.entries...)
+}
+
+func TestWithQueueURLFunc(t *testing.T) {
+	t.Run("AutoDisablesAutoManageAndPrecedesStaticQueueURL", func(t *testing.T) {
+		ctx := t.Context()
+		sqsState := newFakeSQSState()
+		snsState := newFakeSNSState(sqsState)
+
+		qAlpha := "https://sqs.us-east-1.amazonaws.com/123456789012/q-alpha"
+		qBeta := "https://sqs.us-east-1.amazonaws.com/123456789012/q-beta"
+		sqsState.ensurePreProvisionedQueue(qAlpha, "arn:aws:sqs:us-east-1:123456789012:q-alpha")
+		sqsState.ensurePreProvisionedQueue(qBeta, "arn:aws:sqs:us-east-1:123456789012:q-beta")
+
+		cfg := defaultConfig()
+		WithQueueURL("https://sqs.us-east-1.amazonaws.com/123456789012/ignored-static")(&cfg)
+		WithQueueURLFunc(func(topic string) string {
+			return "https://sqs.us-east-1.amazonaws.com/123456789012/q-" + topic
+		})(&cfg)
+
+		if cfg.shouldAutoManage() {
+			t.Fatal("expected shouldAutoManage() to be false when WithQueueURLFunc is set")
+		}
+
+		c, err := newClientWithBackends(snsState, sqsState, cfg)
+		if err != nil {
+			t.Fatalf("newClientWithBackends() error = %v", err)
+		}
+		defer func() { _ = c.Close() }()
+
+		chA, err := c.Subscribe(ctx, "alpha")
+		if err != nil {
+			t.Fatalf("Subscribe(alpha) error = %v", err)
+		}
+		chB, err := c.Subscribe(ctx, "beta")
+		if err != nil {
+			t.Fatalf("Subscribe(beta) error = %v", err)
+		}
+
+		sqsState.deliverRawToURL(qAlpha, "msg-alpha", nil)
+		sqsState.deliverRawToURL(qBeta, "msg-beta", nil)
+
+		if got := string(<-chA); got != "msg-alpha" {
+			t.Errorf("alpha = %q, want msg-alpha", got)
+		}
+		if got := string(<-chB); got != "msg-beta" {
+			t.Errorf("beta = %q, want msg-beta", got)
+		}
+
+		// Zero admin calls should have occurred.
+		sqsState.mu.Lock()
+		createCalls := sqsState.createCalls
+		deleteCalls := sqsState.deleteCalls
+		sqsState.mu.Unlock()
+		snsState.mu.Lock()
+		createTopicCalls := snsState.createTopicCalls
+		subCalls := snsState.subscribeCalls
+		snsState.mu.Unlock()
+		if createCalls != 0 || deleteCalls != 0 || createTopicCalls != 0 || subCalls != 0 {
+			t.Errorf("expected zero admin RPCs, got createQueue=%d deleteQueue=%d createTopic=%d subscribe=%d",
+				createCalls, deleteCalls, createTopicCalls, subCalls)
+		}
+	})
+
+	t.Run("AutoManageTrueOverridesQueueURLFunc", func(t *testing.T) {
+		cfg := defaultConfig()
+		WithQueueURLFunc(func(string) string { return "https://example.com/q" })(&cfg)
+		WithAutoManage(true)(&cfg)
+		if !cfg.shouldAutoManage() {
+			t.Fatal("expected WithAutoManage(true) to override WithQueueURLFunc")
+		}
+	})
+
+	t.Run("EmptyOrInvalidQueueURLFromFuncPreservesExistingSub", func(t *testing.T) {
+		ctx := t.Context()
+		sqsState := newFakeSQSState()
+		snsState := newFakeSNSState(sqsState)
+		qValid := "https://sqs.us-east-1.amazonaws.com/123456789012/valid"
+		sqsState.ensurePreProvisionedQueue(qValid, "arn:aws:sqs:us-east-1:123456789012:valid")
+
+		mode := "valid"
+		cfg := defaultConfig()
+		WithQueueURLFunc(func(topic string) string {
+			if topic == "valid-topic" && mode == "valid" {
+				return qValid
+			}
+			if mode == "empty" {
+				return ""
+			}
+			return "not-a-url"
+		})(&cfg)
+
+		c, err := newClientWithBackends(snsState, sqsState, cfg)
+		if err != nil {
+			t.Fatalf("newClientWithBackends() error = %v", err)
+		}
+		defer func() { _ = c.Close() }()
+
+		ch, err := c.Subscribe(ctx, "valid-topic")
+		if err != nil {
+			t.Fatalf("Subscribe(valid-topic) error = %v", err)
+		}
+
+		// Failing validation on resubscribe must NOT stop the existing subscription.
+		mode = "empty"
+		if _, err := c.Subscribe(ctx, "valid-topic"); !errors.Is(err, ErrMissingQueueURL) {
+			t.Fatalf("Subscribe(empty) = %v, want ErrMissingQueueURL", err)
+		}
+		mode = "invalid"
+		if _, err := c.Subscribe(ctx, "valid-topic"); !errors.Is(err, ErrInvalidQueueURL) {
+			t.Fatalf("Subscribe(invalid) = %v, want ErrInvalidQueueURL", err)
+		}
+
+		sqsState.deliverRawToURL(qValid, "still-alive", nil)
+		select {
+		case got := <-ch:
+			if string(got) != "still-alive" {
+				t.Fatalf("received %q, want still-alive", string(got))
+			}
+		case <-time.After(time.Second):
+			t.Fatal("existing subscription was unexpectedly stopped on failed validation")
+		}
+	})
+}
+
+func TestWithLogger(t *testing.T) {
+	t.Run("NilLoggerIsSafe", func(t *testing.T) {
+		sqsState := newFakeSQSState()
+		snsState := newFakeSNSState(sqsState)
+		cfg := defaultConfig()
+		WithLogger(nil)(&cfg)
+		c, err := newClientWithBackends(snsState, sqsState, cfg)
+		if err != nil {
+			t.Fatalf("newClientWithBackends() error = %v", err)
+		}
+		defer func() { _ = c.Close() }()
+		c.log().Warn("discarded")
+
+		zeroClient := &Client{}
+		zeroClient.log().Warn("discarded")
+	})
+
+	t.Run("LogsReceiveDeleteBase64SlowConsumerAndCleanupErrors", func(t *testing.T) {
+		ctx := t.Context()
+		handler := &awsCaptureHandler{}
+		sqsState := newFakeSQSState()
+		snsState := newFakeSNSState(sqsState)
+		qURL := "https://sqs.us-east-1.amazonaws.com/123456789012/log-queue"
+		sqsState.ensurePreProvisionedQueue(qURL, "arn:aws:sqs:us-east-1:123456789012:log-queue")
+
+		cfg := defaultConfig()
+		WithQueueURL(qURL)(&cfg)
+		WithChannelBuffer(1)(&cfg)
+		WithLogger(slog.New(handler))(&cfg)
+
+		c, err := newClientWithBackends(snsState, sqsState, cfg)
+		if err != nil {
+			t.Fatalf("newClientWithBackends() error = %v", err)
+		}
+		defer func() { _ = c.Close() }()
+
+		sqsState.failReceiveOnce.Store(true)
+		sqsState.deleteMsgErr = errors.New("delete message failed")
+
+		ch, err := c.Subscribe(ctx, "log-topic")
+		if err != nil {
+			t.Fatalf("Subscribe() error = %v", err)
+		}
+
+		// Deliver 1) invalid base64 payload (fills buffer=1), 2) second payload (blocks -> slow consumer warn).
+		sqsState.deliverRawToURL(qURL, "!!!not-base64!!!", map[string]sqstypes.MessageAttributeValue{
+			encodingAttributeKey: {
+				DataType:    aws.String("String"),
+				StringValue: aws.String(encodingBase64Value),
+			},
+		})
+		sqsState.deliverRawToURL(qURL, "second-msg", nil)
+
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if handler.hasWarn("aws sqs receive failed") &&
+				handler.hasWarn("failed to decode base64 payload") &&
+				handler.hasWarn("aws sqs delete message failed") &&
+				handler.hasWarn("subscriber buffer full") {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+
+		for _, want := range []string{
+			"aws sqs receive failed",
+			"failed to decode base64 payload",
+			"aws sqs delete message failed",
+			"subscriber buffer full",
+		} {
+			if !handler.hasWarn(want) {
+				t.Errorf("expected warn %q, got %+v", want, handler.snapshot())
+			}
+		}
+
+		if got := string(<-ch); got != "!!!not-base64!!!" {
+			t.Errorf("first payload = %q, want raw fallback", got)
+		}
+		if err := c.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+		assertNoGoroutineLeaks(t)
+	})
+
+	t.Run("LogsRollbackCleanupAndResubscribeStopErrors", func(t *testing.T) {
+		ctx := t.Context()
+		handler := &awsCaptureHandler{}
+		sqsState := newFakeSQSState()
+		snsState := newFakeSNSState(sqsState)
+		sqsState.getAttrErr = errors.New("get attr failed")
+		sqsState.deleteQueueErr = errors.New("delete queue failed")
+
+		cfg := defaultConfig()
+		WithLogger(slog.New(handler))(&cfg)
+		c, err := newClientWithBackends(snsState, sqsState, cfg)
+		if err != nil {
+			t.Fatalf("newClientWithBackends() error = %v", err)
+		}
+		defer func() { _ = c.Close() }()
+
+		if _, err := c.Subscribe(ctx, "rollback-topic"); err == nil {
+			t.Fatal("expected Subscribe failure")
+		}
+		if !handler.hasWarn("failed to clean up ephemeral resources") {
+			t.Errorf("expected cleanup ephemeral resources warn, got %+v", handler.entries)
+		}
+
+		// Now allow setup, then break DeleteQueue before resubscribing.
+		sqsState.getAttrErr = nil
+		sqsState.deleteQueueErr = nil
+		ch1, err := c.Subscribe(ctx, "resub-warn")
+		if err != nil {
+			t.Fatalf("Subscribe(resub-warn) error = %v", err)
+		}
+		sqsState.deleteQueueErr = errors.New("delete queue boom")
+		ch2, err := c.Subscribe(ctx, "resub-warn")
+		if err != nil {
+			t.Fatalf("second Subscribe(resub-warn) error = %v", err)
+		}
+		for range ch1 {
+		}
+		sqsState.deleteQueueErr = nil
+		if err := c.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+		for range ch2 {
+		}
+
+		if !handler.hasWarn("failed to stop previous subscription on resubscribe") {
+			t.Errorf("expected resubscribe stop warn, got %+v", handler.entries)
+		}
 		assertNoGoroutineLeaks(t)
 	})
 }

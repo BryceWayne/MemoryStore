@@ -1,16 +1,20 @@
 package redis
 
+import "log/slog"
+
 const defaultChannelBuffer = 100
 
 type config struct {
 	channelBuffer int
 	closeClient   bool
+	logger        *slog.Logger
 }
 
 func defaultConfig(closeClient bool) config {
 	return config{
 		channelBuffer: defaultChannelBuffer,
 		closeClient:   closeClient,
+		logger:        discardLogger,
 	}
 }
 
@@ -33,5 +37,16 @@ func WithChannelBuffer(size int) Option {
 func WithCloseClient(closeClient bool) Option {
 	return func(c *config) {
 		c.closeClient = closeClient
+	}
+}
+
+// WithLogger sets a structured logger for background receive, retry backoff,
+// and subscription cleanup errors. Nil loggers are ignored, preserving the
+// default discard logger.
+func WithLogger(l *slog.Logger) Option {
+	return func(c *config) {
+		if l != nil {
+			c.logger = l
+		}
 	}
 }

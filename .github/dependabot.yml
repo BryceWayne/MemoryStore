@@ -5,9 +5,20 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+
+  - package-ecosystem: "gomod"
+    directory: "/benchmarks"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
     labels:
-      - "dependencies"
-      - "go"
+      - "performance"
+
+  - package-ecosystem: "gomod"
+    directory: "/e2e"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
 
   - package-ecosystem: "gomod"
     directory: "/pubsub/gcp"
@@ -15,8 +26,7 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 5
     labels:
-      - "dependencies"
-      - "go"
+      - "pubsub"
 
   - package-ecosystem: "gomod"
     directory: "/pubsub/azure"
@@ -24,8 +34,7 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 5
     labels:
-      - "dependencies"
-      - "go"
+      - "pubsub"
 
   - package-ecosystem: "gomod"
     directory: "/pubsub/redis"
@@ -33,8 +42,7 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 5
     labels:
-      - "dependencies"
-      - "go"
+      - "pubsub"
 
   - package-ecosystem: "gomod"
     directory: "/pubsub/nats"
@@ -42,8 +50,7 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 5
     labels:
-      - "dependencies"
-      - "go"
+      - "pubsub"
 
   - package-ecosystem: "gomod"
     directory: "/pubsub/aws"
@@ -51,8 +58,7 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 5
     labels:
-      - "dependencies"
-      - "go"
+      - "pubsub"
 
   - package-ecosystem: "gomod"
     directory: "/pubsub/kafka"
@@ -60,14 +66,22 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 5
     labels:
-      - "dependencies"
-      - "go"
+      - "pubsub"
+
+  - package-ecosystem: "gomod"
+    directory: "/metrics/otel"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "gomod"
+    directory: "/metrics/prometheus"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
-    labels:
-      - "dependencies"
-      - "ci"

@@ -10,7 +10,7 @@ import (
 	"time"
 	"uuid"
 
-	"github.com/BryceWayne/MemoryStore/memorystore"
+	"github.com/BryceWayne/MemoryStore/v2/memorystore"
 )
 
 // Person represents a sample JSON-serializable struct.
@@ -99,10 +99,13 @@ func demonstratePubSub(ms *memorystore.MemoryStore) {
 
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	ms := memorystore.NewMemoryStoreWithConfig(memorystore.Config{
-		Logger:        logger,
-		PubSubTimeout: 5 * time.Second,
-	})
+	ms, err := memorystore.New(
+		memorystore.WithLogger(logger),
+		memorystore.WithPubSubTimeout(5*time.Second),
+	)
+	if err != nil {
+		log.Fatalf("Failed to create memorystore: %v", err)
+	}
 	defer func() {
 		if err := ms.Stop(); err != nil {
 			log.Printf("Error stopping store: %v", err)

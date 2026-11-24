@@ -13,7 +13,10 @@ import (
 )
 
 func TestMemoryStore_JSONv2Defaults(t *testing.T) {
-	ms := NewMemoryStore()
+	ms, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	defer func() {
 		_ = ms.Stop()
 	}()
@@ -59,7 +62,10 @@ func TestMemoryStore_JSONv2Defaults(t *testing.T) {
 }
 
 func TestMemoryStore_JSONv2StrictValidation(t *testing.T) {
-	ms := NewMemoryStore()
+	ms, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	defer func() {
 		_ = ms.Stop()
 	}()
@@ -95,7 +101,10 @@ func TestMemoryStore_JSONv2StrictValidation(t *testing.T) {
 }
 
 func TestMemoryStore_JSONWithOptions(t *testing.T) {
-	ms := NewMemoryStore()
+	ms, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	defer func() {
 		_ = ms.Stop()
 	}()
@@ -162,7 +171,10 @@ func TestMemoryStore_JSONWithOptions(t *testing.T) {
 }
 
 func TestMemoryStore_BatchEdgeCases(t *testing.T) {
-	ms := NewMemoryStore()
+	ms, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	defer func() {
 		_ = ms.Stop()
 	}()
@@ -206,7 +218,10 @@ func TestMemoryStore_BatchEdgeCases(t *testing.T) {
 }
 
 func TestMemoryStore_ExpirationOverflowAndNegative(t *testing.T) {
-	ms := NewMemoryStore()
+	ms, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	defer func() {
 		_ = ms.Stop()
 	}()
@@ -257,7 +272,10 @@ func TestMemoryStore_NoGoroutineLeaks(t *testing.T) {
 		t.Skip("goroutineleak profile not available")
 	}
 
-	ms := NewMemoryStore()
+	ms, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	ch, err := ms.Subscribe("leak:test")
 	if err != nil {
 		t.Fatalf("Subscribe() error = %v", err)
@@ -274,7 +292,7 @@ func TestMemoryStore_NoGoroutineLeaks(t *testing.T) {
 	if err := prof.WriteTo(&buf, 1); err != nil {
 		t.Fatalf("goroutineleak WriteTo() error = %v", err)
 	}
-	if strings.Contains(buf.String(), "github.com/BryceWayne/MemoryStore/memorystore") {
+	if strings.Contains(buf.String(), "github.com/BryceWayne/MemoryStore/v2/memorystore") {
 		t.Errorf("detected leaked goroutine in memorystore:\n%s", buf.String())
 	}
 }
