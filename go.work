@@ -1,0 +1,17 @@
+go 1.27.0
+
+use (
+	.
+	./benchmarks
+	./e2e
+	./metrics/otel
+	./metrics/prometheus
+	./pubsub/aws
+	./pubsub/azure
+	./pubsub/gcp
+	./pubsub/kafka
+	./pubsub/nats
+	./pubsub/redis
+)
+
+replace github.com/BryceWayne/MemoryStore/v2 v2.0.0 => .

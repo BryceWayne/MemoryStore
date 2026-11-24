@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -18,6 +19,8 @@ const (
 	defaultCleanupTimeout = 10 * time.Second
 	receiveRetryDelay     = 250 * time.Millisecond
 )
+
+var discardLogger = slog.New(slog.DiscardHandler)
 
 // Common errors returned by the Azure Service Bus Pub/Sub client.
 var (
@@ -109,10 +112,10 @@ type realAdminClient struct{ inner *admin.Client }
 
 func (a *realAdminClient) EnsureTopic(ctx context.Context, topic string) error {
 	resp, err := a.inner.GetTopic(ctx, topic, nil)
-	if err != nil {
+	if err != nil && !isHTTPStatus(err, http.StatusNotFound) {
 		return fmt.Errorf("failed to check topic existence: %w", err)
 	}
-	if resp != nil {
+	if err == nil && resp != nil {
 		return nil
 	}
 	if _, err := a.inner.CreateTopic(ctx, topic, nil); err != nil && !isHTTPStatus(err, http.StatusConflict) {
@@ -250,6 +253,13 @@ func newClientWithBackends(data sbDataClient, adm sbAdminClient, cfg config) *Cl
 	}
 }
 
+func (c *Client) log() *slog.Logger {
+	if c.cfg.logger != nil {
+		return c.cfg.logger
+	}
+	return discardLogger
+}
+
 func (c *Client) resolveSubscriptionName(topic string) (string, error) {
 	var name string
 	switch {
@@ -322,7 +332,9 @@ func (c *Client) Subscribe(ctx context.Context, topicName string) (<-chan []byte
 	c.mu.Unlock()
 
 	if existing != nil {
-		_ = c.stopSubscription(ctx, existing)
+		if stopErr := c.stopSubscription(ctx, existing); stopErr != nil {
+			c.log().Warn("azure service bus failed to stop previous subscription on resubscribe", "topic", topicName, "subscription", existing.subName, "error", stopErr)
+		}
 	}
 
 	autoManaged := c.cfg.shouldAutoManage() && c.admin != nil
@@ -341,7 +353,9 @@ func (c *Client) Subscribe(ctx context.Context, topicName string) (<-chan []byte
 	if err != nil {
 		if autoManaged {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), defaultCleanupTimeout)
-			_ = c.admin.DeleteSubscription(cleanupCtx, topicName, subName)
+			if delErr := c.admin.DeleteSubscription(cleanupCtx, topicName, subName); delErr != nil {
+				c.log().Warn("azure service bus failed to delete subscription during receiver rollback", "topic", topicName, "subscription", subName, "error", delErr)
+			}
 			cancel()
 		}
 		return nil, fmt.Errorf("failed to create receiver: %w", err)
@@ -351,14 +365,19 @@ func (c *Client) Subscribe(ctx context.Context, topicName string) (<-chan []byte
 	if c.closed {
 		c.mu.Unlock()
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), defaultCleanupTimeout)
-		_ = receiver.Close(cleanupCtx)
+		if closeErr := receiver.Close(cleanupCtx); closeErr != nil {
+			c.log().Warn("azure service bus failed to close receiver during close rollback", "topic", topicName, "subscription", subName, "error", closeErr)
+		}
 		if autoManaged {
-			_ = c.admin.DeleteSubscription(cleanupCtx, topicName, subName)
+			if delErr := c.admin.DeleteSubscription(cleanupCtx, topicName, subName); delErr != nil {
+				c.log().Warn("azure service bus failed to delete subscription during close rollback", "topic", topicName, "subscription", subName, "error", delErr)
+			}
 		}
 		cancel()
 		return nil, ErrClosed
 	}
 
+	prev := c.subscriptions[topicName]
 	ch := make(chan []byte, c.cfg.channelBuffer)
 	recvCtx, cancel := context.WithCancel(context.Background())
 	entry := &azureSubscription{
@@ -383,6 +402,7 @@ func (c *Client) Subscribe(ctx context.Context, topicName string) (<-chan []byte
 				if recvCtx.Err() != nil {
 					return
 				}
+				c.log().Warn("azure service bus receive failed; retrying", "topic", topicName, "subscription", subName, "retry_delay", receiveRetryDelay, "error", err)
 				timer := time.NewTimer(receiveRetryDelay)
 				select {
 				case <-timer.C:
@@ -396,16 +416,25 @@ func (c *Client) Subscribe(ctx context.Context, topicName string) (<-chan []byte
 			for _, msg := range msgs {
 				select {
 				case ch <- msg.Body:
-					if peekLock {
-						_ = receiver.CompleteMessage(recvCtx, msg)
+				default:
+					c.log().Warn("azure service bus subscriber buffer full; blocking delivery", "topic", topicName, "subscription", subName, "buffer", cap(ch))
+					select {
+					case ch <- msg.Body:
+					case <-recvCtx.Done():
+						if peekLock {
+							abandonCtx, abandonCancel := context.WithTimeout(context.Background(), defaultCleanupTimeout)
+							if abErr := receiver.AbandonMessage(abandonCtx, msg); abErr != nil {
+								c.log().Warn("azure service bus abandon message failed", "topic", topicName, "subscription", subName, "error", abErr)
+							}
+							abandonCancel()
+						}
+						return
 					}
-				case <-recvCtx.Done():
-					if peekLock {
-						abandonCtx, abandonCancel := context.WithTimeout(context.Background(), defaultCleanupTimeout)
-						_ = receiver.AbandonMessage(abandonCtx, msg)
-						abandonCancel()
+				}
+				if peekLock {
+					if compErr := receiver.CompleteMessage(recvCtx, msg); compErr != nil && recvCtx.Err() == nil {
+						c.log().Warn("azure service bus complete message failed", "topic", topicName, "subscription", subName, "error", compErr)
 					}
-					return
 				}
 			}
 		}
@@ -413,6 +442,14 @@ func (c *Client) Subscribe(ctx context.Context, topicName string) (<-chan []byte
 
 	c.subscriptions[topicName] = entry
 	c.mu.Unlock()
+
+	if prev != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), defaultCleanupTimeout)
+		if stopErr := c.stopSubscription(cleanupCtx, prev); stopErr != nil {
+			c.log().Warn("azure service bus failed to stop superseded subscription", "topic", topicName, "subscription", prev.subName, "error", stopErr)
+		}
+		cancel()
+	}
 
 	return ch, nil
 }
@@ -465,7 +502,9 @@ func (c *Client) stopSubscription(ctx context.Context, entry *azureSubscription)
 
 	closeCtx, cancel := context.WithTimeout(context.Background(), defaultCleanupTimeout)
 	defer cancel()
-	_ = entry.receiver.Close(closeCtx)
+	if closeErr := entry.receiver.Close(closeCtx); closeErr != nil {
+		c.log().Warn("azure service bus failed to close receiver", "topic", entry.topic, "subscription", entry.subName, "error", closeErr)
+	}
 
 	if entry.autoManaged && c.admin != nil {
 		return c.admin.DeleteSubscription(ctx, entry.topic, entry.subName)
@@ -493,11 +532,15 @@ func (c *Client) Close() error {
 	defer cancel()
 
 	for _, entry := range subs {
-		_ = c.stopSubscription(cleanupCtx, entry)
+		if stopErr := c.stopSubscription(cleanupCtx, entry); stopErr != nil {
+			c.log().Warn("azure service bus failed to stop subscription during close", "topic", entry.topic, "subscription", entry.subName, "error", stopErr)
+		}
 	}
 
-	for _, sender := range senders {
-		_ = sender.Close(cleanupCtx)
+	for topic, sender := range senders {
+		if closeErr := sender.Close(cleanupCtx); closeErr != nil {
+			c.log().Warn("azure service bus failed to close sender during close", "topic", topic, "error", closeErr)
+		}
 	}
 
 	return c.data.Close(cleanupCtx)

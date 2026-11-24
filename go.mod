@@ -1,4 +1,4 @@
-module github.com/BryceWayne/MemoryStore
+module github.com/BryceWayne/MemoryStore/v2
 
 go 1.27.0
 

@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-11-23
+
+Major **v2.0.0** release (`github.com/BryceWayne/MemoryStore/v2`) delivering a pure-Go, zero-`unsafe`, lock-free Swiss-table read path (**2.6 ns/op** `GetParallel`, **4.6 ns/op** `MixedParallel`), pluggable S3-FIFO / W-TinyLFU eviction policies, functional options with strict validation and post-`Stop()` lifecycle safety, Stale-While-Revalidate (SWR) & async write-through invalidation, streaming CRC32C binary & `jsontext` snapshot persistence, standalone OpenTelemetry & Prometheus observability sub-modules, and cross-adapter Pub/Sub hardening.
+
+### Breaking Changes
+- **Go `/v2` Module Path (#41):** Root module path updated to `github.com/BryceWayne/MemoryStore/v2` (retaining **zero external dependencies** and no root `go.sum`). Update imports to `github.com/BryceWayne/MemoryStore/v2/memorystore`.
+- **Functional Options Constructor (#41):** Replaced `NewMemoryStore()` and `NewMemoryStoreWithConfig(Config)` with `New(opts ...Option) (*MemoryStore, error)` enforcing explicit option validation (rejecting negative bounds, out-of-range jitter, `InvalidationTopic` without `PubSub`, and bounded-only eviction policies without capacity limits).
+- **Typed Lifecycle Errors (#41):** Mutating, load, and snapshot operations (`Set`, `SetWithOptions`, `SetMulti`, `SetJSON*`, `Delete`, `GetOrLoad*`, `Save`, `Load`) now return `ErrStoreStopped` after `Stop()` instead of panicking on nil shard maps; `Get` remains context-free and returns `(nil, false)`.
+- **Bounded Default Eviction & Async Invalidation (#42, #44):** Bounded stores (`MaxItems > 0` or `MaxBytes > 0`) now default to `EvictionS3FIFO` (use `WithEvictionPolicy(EvictionVolatileTTL)` to retain v1 random TTL sampling); `InvalidationTopic` now dispatches asynchronously via a bounded non-blocking queue with a default `5s` `PubSubTimeout` (use `WithSyncInvalidation()` for synchronous test visibility).
+
+### Added
+- **Functional Options, `NoExpiration`, Per-Item `Set` Options & Copy Isolation (#41):** Added `New(opts...)`, `NoExpiration = -1`, `SetWithOptions` (`WithTTLJitter`, `WithSlidingExpiration`, `WithNoExpiration`, `WithStaleWindow`), `WithCopyOnWrite`, and `WithCopyOnRead`.
+- **Pluggable High-Hit-Ratio Eviction Policies (#42):** Added `EvictionS3FIFO`, `EvictionTinyLFU` (4-bit Count-Min Sketch + Doorkeeper + Window/SLRU), and `EvictionVolatileTTL` via `WithEvictionPolicy(...)` with lock-free/batched `0 B/op` read-path tracking (**+28–29%** Zipfian and **+47–48%** scan hit-ratio gains vs `EvictionVolatileTTL`).
+- **Sub-5ns Pure-Go Lock-Free Read Path & Coarse Monotonic Clock (#43):** Replaced `sync.RWMutex` + Go `map` reads with a pure-Go, zero-`unsafe`, `-race`-clean 64-byte Swiss-style open-addressed bucket table (`atomic.Pointer[entry]` + packed `h2` `atomic.Uint64` tags), 128-byte cache-line padded shards, 1ms coarse monotonic clock (`WithPreciseClock()` opt-out + automatic `< 10ms` precise fallback), and `< 3/4` sliding-TTL refresh coalescing (`2.44–2.62 ns/op` `GetParallel` at `0 B/op, 0 allocs/op`; `4.31–4.59 ns/op` `MixedParallel`).
+- **Stale-While-Revalidate (SWR), TTL Jitter & Resilient Write-Through Invalidation (#44):** Added SWR (`softExpiresAt`/`hardExpiresAt`, fresh-only `Get()` vs stale-serving `GetOrLoad*` / `GetOrLoadJSONWithOptions[T]` with coalesced detached-context background refresh), deterministic TTL jitter (`[0.0, 0.5]`), `InvalidationModeWriteThrough` with `WithWriteThroughMaxBytes` fallback, non-blocking async batched invalidation, and exponential-backoff backplane reconnect.
+- **Observability Hooks & Standalone `metrics/otel` / `metrics/prometheus` Sub-Modules (#45):** Added zero-dependency `MetricsRecorder` and `InvalidationDropRecorder` (`0 B/op` when nil), `InMemoryPubSub.DroppedCount()`, `MemoryStore.Health(ctx)` + optional `PubSubClient` `Pinger`, `WithLogger(*slog.Logger)` across all 6 `pubsub/*` adapters, and standalone `github.com/BryceWayne/MemoryStore/metrics/otel` (`v1.0.0`) & `github.com/BryceWayne/MemoryStore/metrics/prometheus` (`v1.0.0`) sub-modules.
+- **Streaming Snapshot Persistence & Warm Restart (#46):** Added zero-dependency streaming `Save(io.Writer, ...SnapshotOption)` and `Load(io.Reader, ...SnapshotOption)` supporting chunked `SnapshotBinary` (`MSNAP\x02` + per-frame `CRC32C` + EOF sentinel) and streaming `SnapshotJSON` (`encoding/json/jsontext`), caller `compress/gzip` compatibility, relative TTL & `NoExpiration` preservation, `Overwrite`/`KeepExisting` conflict policies, incremental `MaxItems`/`MaxBytes` enforcement, and 100K-entry O(1) memory streaming benchmarks.
+- **Fuzzing, Opaque-Box E2E Suite & Engineering Roadmap:** Added `FuzzMatchesTopic`, `FuzzInvalidationUnmarshal`, `FuzzSnapshotLoad`, `FuzzAWSExtractPayload`, standalone `e2e/` test suite (124 tests wired into `Makefile`, `go.work`, and CI), `ROADMAP.md`, and cross-adapter Broker Capability & Wildcard Matrix in `README.md`.
+
+### Fixed
+- **Core Lifecycle, Singleflight & Accounting:** Eliminated TOCTOU post-`Stop()` nil-map panics across `Set`/`SetMulti`/`GetOrLoad*`, fixed `singleflightGroup.do` panic propagation (preventing `(nil, nil)` waiter leaks), removed redundant JSON unmarshal on `GetOrLoadJSON[T]` leader path, made unbounded `GetMetrics()` unconditionally **O(1)**, and fixed `Set(k, v, ttl <= 0)` so expired writes delete without inserting dead entries or evicting live items.
+- **Pub/Sub Adapter Hardening (`pubsub/*/v1.2.0`):**
+  - `pubsub/gcp`: Stopped/cleaned up prior subscriptions on duplicate `Subscribe`, sanitized subscription IDs (<= 255 chars), checked `ctx.Err()` at entry, and added `WithChannelBuffer` / `WithLogger`.
+  - `pubsub/azure`: Fixed `realAdminClient.EnsureTopic` to auto-create topics on HTTP `404 NotFound`, added `WithLogger`, and raised statement coverage from **64.7%** → **97.1%**.
+  - `pubsub/redis`: Added `100ms → 5s` exponential backoff in `receiveLoop` and `WithLogger`.
+  - `pubsub/nats`, `pubsub/aws`, `pubsub/kafka`: Added `WithLogger(*slog.Logger)` and raised coverage above **91%** across every adapter.
+- **Repository & CI Hygiene (#34):** Fixed `.github/dependabot.yml` labels and added `/benchmarks`, `/metrics/otel`, `/metrics/prometheus`, and `/e2e`; updated `.github/ISSUE_TEMPLATE/config.yml` `pkg.go.dev` link to `/v2/memorystore`.
+
 ## [1.1.0] - 2026-11-23
 
 Adds four standalone Go 1.27+ Pub/Sub adapters (`pubsub/redis`, `pubsub/nats`, `pubsub/aws`, and `pubsub/kafka`) with zero dependency on the root `memorystore` package, expands CI/Makefile/Dependabot/README coverage across all six `pubsub/*` modules, and raises `pubsub/gcp` offline test coverage to 98%+.
@@ -104,7 +132,8 @@ Initial tagged release of **MemoryStore**, built for **Go 1.27+**.
 - Pluggable `PubSubClient` interface with In-Memory wildcard broker and Google Cloud Pub/Sub backend.
 - Race-tested unit test suite, Makefile automation, and GitHub Actions CI.
 
-[Unreleased]: https://github.com/BryceWayne/MemoryStore/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/BryceWayne/MemoryStore/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/BryceWayne/MemoryStore/compare/v1.1.0...v2.0.0
 [1.1.0]: https://github.com/BryceWayne/MemoryStore/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/BryceWayne/MemoryStore/compare/v0.2.0...v1.0.0
 [0.2.0]: https://github.com/BryceWayne/MemoryStore/compare/v0.1.0...v0.2.0

@@ -1,16 +1,21 @@
 package memorystore_test
 
 import (
+	"bytes"
 	"context"
 	json "encoding/json/v2"
 	"fmt"
 	"time"
 
-	"github.com/BryceWayne/MemoryStore/memorystore"
+	"github.com/BryceWayne/MemoryStore/v2/memorystore"
 )
 
 func ExampleMemoryStore_Set() {
-	store := memorystore.NewMemoryStore()
+	store, err := memorystore.New()
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
 	defer func() { _ = store.Stop() }()
 
 	if err := store.Set("greeting", []byte("hello, world"), time.Minute); err != nil {
@@ -26,7 +31,11 @@ func ExampleMemoryStore_Set() {
 }
 
 func ExampleMemoryStore_SetJSON() {
-	store := memorystore.NewMemoryStore()
+	store, err := memorystore.New()
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
 	defer func() { _ = store.Stop() }()
 
 	type User struct {
@@ -49,7 +58,11 @@ func ExampleMemoryStore_SetJSON() {
 }
 
 func ExampleMemoryStore_SetJSONWithOptions() {
-	store := memorystore.NewMemoryStore()
+	store, err := memorystore.New()
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
 	defer func() { _ = store.Stop() }()
 
 	data := map[string]int{"b": 2, "a": 1}
@@ -66,7 +79,11 @@ func ExampleMemoryStore_SetJSONWithOptions() {
 }
 
 func ExampleMemoryStore_SetMulti() {
-	store := memorystore.NewMemoryStore()
+	store, err := memorystore.New()
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
 	defer func() { _ = store.Stop() }()
 
 	items := map[string][]byte{
@@ -85,7 +102,11 @@ func ExampleMemoryStore_SetMulti() {
 }
 
 func ExampleMemoryStore_Subscribe() {
-	store := memorystore.NewMemoryStore()
+	store, err := memorystore.New()
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
 	defer func() { _ = store.Stop() }()
 
 	ch, err := store.Subscribe("events:*")
@@ -106,7 +127,11 @@ func ExampleMemoryStore_Subscribe() {
 }
 
 func ExampleMemoryStore_GetJSONAs() {
-	store := memorystore.NewMemoryStore()
+	store, err := memorystore.New()
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
 	defer func() { _ = store.Stop() }()
 
 	type User struct {
@@ -124,7 +149,11 @@ func ExampleMemoryStore_GetJSONAs() {
 }
 
 func ExampleMemoryStore_GetOrLoadJSON() {
-	store := memorystore.NewMemoryStore()
+	store, err := memorystore.New()
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
 	defer func() { _ = store.Stop() }()
 
 	type Product struct {
@@ -140,4 +169,38 @@ func ExampleMemoryStore_GetOrLoadJSON() {
 	}
 	// Output:
 	// sku:1=$1999
+}
+
+func ExampleMemoryStore_Save() {
+	src, err := memorystore.New()
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	defer func() { _ = src.Stop() }()
+
+	_ = src.Set("session:1", []byte("active"), time.Minute)
+
+	var snap bytes.Buffer
+	if err := src.Save(&snap); err != nil {
+		fmt.Println("save error:", err)
+		return
+	}
+
+	dst, err := memorystore.New()
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	defer func() { _ = dst.Stop() }()
+
+	if err := dst.Load(&snap); err != nil {
+		fmt.Println("load error:", err)
+		return
+	}
+	if val, ok := dst.Get("session:1"); ok {
+		fmt.Println(string(val))
+	}
+	// Output:
+	// active
 }

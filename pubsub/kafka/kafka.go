@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
@@ -22,6 +23,10 @@ const (
 	describeGroupRetryWait = 50 * time.Millisecond
 	describeGroupMaxTries  = 4
 	kafkaFetchAPIKey       = int16(1)
+)
+
+var (
+	discardLogger = slog.New(slog.DiscardHandler)
 )
 
 // Common errors returned by the Kafka Pub/Sub client.
@@ -45,12 +50,20 @@ type Client struct {
 }
 
 type kafkaSubscription struct {
+	topic        string
 	subClient    *kgo.Client
 	cancel       context.CancelFunc
 	wg           sync.WaitGroup
 	markMu       sync.Mutex
 	armed        bool
 	pendingMarks []*kgo.Record
+}
+
+func (c *Client) log() *slog.Logger {
+	if c.cfg.logger != nil {
+		return c.cfg.logger
+	}
+	return discardLogger
 }
 
 // NewClient creates a new Kafka Pub/Sub client connected to brokers.
@@ -73,6 +86,9 @@ func NewClient(brokers []string, opts ...Option) (*Client, error) {
 		if opt != nil {
 			opt(&cfg)
 		}
+	}
+	if cfg.logger == nil {
+		cfg.logger = discardLogger
 	}
 
 	commonOpts := []kgo.Opt{
@@ -209,7 +225,7 @@ func (c *Client) Subscribe(ctx context.Context, topicName string) (<-chan []byte
 			kgo.ConsumeResetOffset(kgo.NewOffset().AtEnd()),
 		)
 	} else {
-		readiness = newGroupReadiness(topicName, c.cfg.consumerGroup, c.producer, recvCtx, partLeaders)
+		readiness = newGroupReadiness(topicName, c.cfg.consumerGroup, c.producer, recvCtx, partLeaders, c.log())
 		subOpts = slices.Clone(c.groupConsumerOpts)
 		subOpts = append(subOpts,
 			kgo.ConsumerGroup(c.cfg.consumerGroup),
@@ -231,6 +247,7 @@ func (c *Client) Subscribe(ctx context.Context, topicName string) (<-chan []byte
 			// kgo.GreedyAutoCommit() via WithKafkaOptions, adding
 			// kgo.AutoCommitMarks() is rejected by kgo validation; fall back to
 			// the caller's configured commit mode.
+			c.log().Debug("retrying kafka consumer client without AutoCommitMarks", "topic", topicName, "err", err)
 			if fallbackClient, fallbackErr := kgo.NewClient(subOpts...); fallbackErr == nil {
 				subClient = fallbackClient
 				err = nil
@@ -246,6 +263,7 @@ func (c *Client) Subscribe(ctx context.Context, topicName string) (<-chan []byte
 
 	ch := make(chan []byte, c.cfg.channelBuffer)
 	entry := &kafkaSubscription{
+		topic:     topicName,
 		subClient: subClient,
 		cancel:    cancel,
 	}
@@ -280,7 +298,13 @@ func (c *Client) Subscribe(ctx context.Context, topicName string) (<-chan []byte
 					return
 				}
 			}
-			retryWait := fetches.Empty() && len(fetches.Errors()) > 0
+			errs := fetches.Errors()
+			for _, fe := range errs {
+				if !errors.Is(fe.Err, context.Canceled) && !errors.Is(fe.Err, kgo.ErrClientClosed) {
+					c.log().Warn("kafka fetch error", "topic", fe.Topic, "partition", fe.Partition, "err", fe.Err)
+				}
+			}
+			retryWait := fetches.Empty() && len(errs) > 0
 			subClient.AllowRebalance()
 			if retryWait {
 				timer := time.NewTimer(receiveRetryDelay)
@@ -427,6 +451,7 @@ func (c *Client) Close() error {
 	var firstErr error
 	if producer != nil {
 		if err := producer.Flush(cleanupCtx); err != nil {
+			c.log().Warn("kafka producer flush failed during close", "err", err)
 			firstErr = err
 		}
 		producer.Close()
@@ -463,15 +488,21 @@ func (c *Client) stopSubscription(ctx context.Context, entry *kafkaSubscription,
 		if commit {
 			if vals := entry.subClient.OptValues(kgo.AutoCommitMarks); len(vals) > 0 {
 				if marks, ok := vals[0].(bool); ok && marks {
-					_ = entry.subClient.CommitMarkedOffsets(ctx)
+					if err := entry.subClient.CommitMarkedOffsets(ctx); err != nil {
+						c.log().Warn("kafka commit marked offsets failed", "topic", entry.topic, "group", c.cfg.consumerGroup, "err", err)
+					}
 				} else if greedyVals := entry.subClient.OptValues(kgo.GreedyAutoCommit); len(greedyVals) > 0 {
 					if greedy, ok := greedyVals[0].(bool); ok && greedy {
-						_ = entry.subClient.CommitUncommittedOffsets(ctx)
+						if err := entry.subClient.CommitUncommittedOffsets(ctx); err != nil {
+							c.log().Warn("kafka commit uncommitted offsets failed", "topic", entry.topic, "group", c.cfg.consumerGroup, "err", err)
+						}
 					}
 				}
 			}
 		}
-		_ = entry.subClient.LeaveGroupContext(ctx)
+		if err := entry.subClient.LeaveGroupContext(ctx); err != nil {
+			c.log().Warn("kafka leave group failed", "topic", entry.topic, "group", c.cfg.consumerGroup, "err", err)
+		}
 	}
 	entry.subClient.CloseAllowingRebalance()
 }
@@ -504,6 +535,7 @@ func (c *Client) fetchTopicPartitions(ctx context.Context, topicName string) (ma
 			if !retryable {
 				return nil, kerrVal
 			}
+			c.log().Debug("retrying kafka topic metadata/creation", "topic", topicName, "error_code", t.ErrorCode)
 		} else if len(t.Partitions) > 0 {
 			leaders := make(map[int32]int32, len(t.Partitions))
 			allLeadersReady := true
@@ -577,6 +609,7 @@ func (c *Client) fetchEndOffsets(ctx context.Context, topicName string, partLead
 					if p.ErrorCode != 0 {
 						kerrVal := kerr.ErrorForCode(p.ErrorCode)
 						if kerr.IsRetriable(kerrVal) {
+							c.log().Debug("retrying kafka list offsets", "topic", topicName, "partition", p.Partition, "err", kerrVal)
 							retry = true
 							break
 						}
@@ -620,6 +653,7 @@ type groupReadiness struct {
 	producer       *kgo.Client
 	stopCtx        context.Context
 	partLeaders    map[int32]int32
+	logger         *slog.Logger
 	readyCh        chan struct{}
 	readyOnce      sync.Once
 	mu             sync.Mutex
@@ -634,13 +668,18 @@ func newGroupReadiness(
 	producer *kgo.Client,
 	stopCtx context.Context,
 	partLeaders map[int32]int32,
+	logger *slog.Logger,
 ) *groupReadiness {
+	if logger == nil {
+		logger = discardLogger
+	}
 	return &groupReadiness{
 		topic:          topic,
 		group:          group,
 		producer:       producer,
 		stopCtx:        stopCtx,
 		partLeaders:    partLeaders,
+		logger:         logger,
 		readyCh:        make(chan struct{}),
 		neededLeaders:  make(map[int32]struct{}),
 		fetchedBrokers: make(map[int32]struct{}),
@@ -717,6 +756,9 @@ func (g *groupReadiness) isStandbyConfirmed() bool {
 			if reqCtx.Err() != nil || errors.Is(err, kgo.ErrClientClosed) {
 				return false
 			}
+			if g.logger != nil {
+				g.logger.Debug("retrying kafka DescribeGroups for standby readiness", "topic", g.topic, "group", g.group, "err", err)
+			}
 			continue
 		}
 
@@ -763,6 +805,9 @@ func (g *groupReadiness) isStandbyConfirmed() bool {
 			}
 			parsed, parseErr := kgo.ParseConsumerSyncAssignment(m.MemberAssignment)
 			if parseErr != nil {
+				if g.logger != nil {
+					g.logger.Warn("failed to parse kafka consumer group assignment", "topic", g.topic, "group", g.group, "err", parseErr)
+				}
 				continue
 			}
 			for _, p := range parsed[g.topic] {

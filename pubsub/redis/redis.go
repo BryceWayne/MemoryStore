@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"reflect"
 	"strings"
@@ -16,7 +17,8 @@ import (
 const (
 	defaultCleanupTimeout = 10 * time.Second
 	unsubscribeTimeout    = 2 * time.Second
-	receiveRetryDelay     = 100 * time.Millisecond
+	initialRetryDelay     = 100 * time.Millisecond
+	maxRetryDelay         = 5 * time.Second
 	defaultDialTimeout    = 5 * time.Second
 )
 
@@ -27,6 +29,8 @@ var (
 	ErrInvalidClient  = errors.New("redis universal client is required")
 	ErrClosed         = errors.New("redis pubsub client is closed")
 )
+
+var discardLogger = slog.New(slog.DiscardHandler)
 
 // Client implements memorystore.PubSubClient using go-redis UniversalClient
 // Pub/Sub (supporting standalone, Sentinel, and Cluster topologies).
@@ -45,7 +49,7 @@ type Client struct {
 type redisSubscription struct {
 	topic     string
 	isPattern bool
-	ps        *redis.PubSub
+	ps        pubsubHandle
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
 }
@@ -90,6 +94,9 @@ func NewClientFromClient(client redis.UniversalClient, opts ...Option) (*Client,
 }
 
 func newClient(client redis.UniversalClient, cfg config) *Client {
+	if cfg.logger == nil {
+		cfg.logger = discardLogger
+	}
 	closeCtx, closeCancel := context.WithCancel(context.Background())
 	return &Client{
 		client:        client,
@@ -98,6 +105,13 @@ func newClient(client redis.UniversalClient, cfg config) *Client {
 		closeCtx:      closeCtx,
 		closeCancel:   closeCancel,
 	}
+}
+
+func (c *Client) log() *slog.Logger {
+	if c.cfg.logger != nil {
+		return c.cfg.logger
+	}
+	return discardLogger
 }
 
 type handshakeAbortKey struct{}
@@ -194,15 +208,24 @@ func waitForSubscription(ctx context.Context, ps *redis.PubSub) error {
 	}
 }
 
-func closeUnusedPubSub(ctx context.Context, ps *redis.PubSub, topic string, isPattern bool) {
+func closeUnusedPubSub(ctx context.Context, ps *redis.PubSub, topic string, isPattern bool, logger *slog.Logger) {
+	if logger == nil {
+		logger = discardLogger
+	}
 	cleanupCtx, cancel := context.WithTimeout(ctx, unsubscribeTimeout)
+	var unsubErr error
 	if isPattern {
-		_ = ps.PUnsubscribe(cleanupCtx, topic)
+		unsubErr = ps.PUnsubscribe(cleanupCtx, topic)
 	} else {
-		_ = ps.Unsubscribe(cleanupCtx, topic)
+		unsubErr = ps.Unsubscribe(cleanupCtx, topic)
 	}
 	cancel()
-	_ = ps.Close()
+	if unsubErr != nil && !errors.Is(unsubErr, redis.ErrClosed) && !errors.Is(unsubErr, context.Canceled) {
+		logger.Warn("failed to unsubscribe unused redis pubsub", "topic", topic, "pattern", isPattern, "err", unsubErr)
+	}
+	if closeErr := ps.Close(); closeErr != nil && !errors.Is(closeErr, redis.ErrClosed) {
+		logger.Warn("failed to close unused redis pubsub", "topic", topic, "err", closeErr)
+	}
 }
 
 // Subscribe subscribes to topic and returns a channel delivering received
@@ -267,7 +290,9 @@ func (c *Client) Subscribe(ctx context.Context, topic string) (<-chan []byte, er
 	case <-subCtx.Done():
 		go func() {
 			if p := <-psCh; p != nil {
-				_ = p.Close()
+				if closeErr := p.Close(); closeErr != nil && !errors.Is(closeErr, redis.ErrClosed) {
+					c.log().Warn("failed to close abandoned redis pubsub", "topic", topic, "err", closeErr)
+				}
 			}
 		}()
 		if c.closeCtx.Err() != nil {
@@ -303,12 +328,12 @@ func (c *Client) Subscribe(ctx context.Context, topic string) (<-chan []byte, er
 	c.mu.Lock()
 	if c.closed || c.closeCtx.Err() != nil {
 		c.mu.Unlock()
-		closeUnusedPubSub(context.Background(), ps, topic, isPattern)
+		closeUnusedPubSub(context.Background(), ps, topic, isPattern, c.log())
 		return nil, ErrClosed
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		c.mu.Unlock()
-		closeUnusedPubSub(c.closeCtx, ps, topic, isPattern)
+		closeUnusedPubSub(c.closeCtx, ps, topic, isPattern, c.log())
 		return nil, ctxErr
 	}
 
@@ -326,31 +351,7 @@ func (c *Client) Subscribe(ctx context.Context, topic string) (<-chan []byte, er
 	entry.wg.Go(func() {
 		defer c.wg.Done()
 		defer close(ch)
-		for {
-			if recvCtx.Err() != nil {
-				return
-			}
-			msg, err := ps.ReceiveMessage(recvCtx)
-			if err != nil {
-				if recvCtx.Err() != nil {
-					return
-				}
-				timer := time.NewTimer(receiveRetryDelay)
-				select {
-				case <-timer.C:
-				case <-recvCtx.Done():
-					timer.Stop()
-					return
-				}
-				continue
-			}
-
-			select {
-			case ch <- []byte(msg.Payload):
-			case <-recvCtx.Done():
-				return
-			}
-		}
+		receiveLoop(recvCtx, topic, ps, ch, waitRetry, c.log())
 	})
 
 	c.subscriptions[topic] = entry
@@ -361,6 +362,72 @@ func (c *Client) Subscribe(ctx context.Context, topic string) (<-chan []byte, er
 	}
 
 	return ch, nil
+}
+
+type pubsubReceiver interface {
+	ReceiveMessage(ctx context.Context) (*redis.Message, error)
+}
+
+type pubsubHandle interface {
+	pubsubReceiver
+	Unsubscribe(ctx context.Context, channels ...string) error
+	PUnsubscribe(ctx context.Context, patterns ...string) error
+	Close() error
+}
+
+func waitRetry(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		timer.Stop()
+		return false
+	}
+}
+
+func receiveLoop(
+	ctx context.Context,
+	topic string,
+	ps pubsubReceiver,
+	ch chan<- []byte,
+	waitFn func(context.Context, time.Duration) bool,
+	logger *slog.Logger,
+) {
+	if logger == nil {
+		logger = discardLogger
+	}
+	retryDelay := initialRetryDelay
+	hadError := false
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		msg, err := ps.ReceiveMessage(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			logger.Warn("redis receive failed; retrying with backoff", "topic", topic, "retry_delay", retryDelay, "err", err)
+			hadError = true
+			if !waitFn(ctx, retryDelay) {
+				return
+			}
+			retryDelay = min(retryDelay*2, maxRetryDelay)
+			continue
+		}
+		if hadError {
+			logger.Info("redis receive loop recovered", "topic", topic)
+			hadError = false
+		}
+		retryDelay = initialRetryDelay
+
+		select {
+		case ch <- []byte(msg.Payload):
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // Publish publishes message to topic.
@@ -411,12 +478,18 @@ func (c *Client) stopSubscription(ctx context.Context, entry *redisSubscription)
 
 	unsubCtx, cancel := context.WithTimeout(ctx, unsubscribeTimeout)
 	defer cancel()
+	var unsubErr error
 	if entry.isPattern {
-		_ = entry.ps.PUnsubscribe(unsubCtx, entry.topic)
+		unsubErr = entry.ps.PUnsubscribe(unsubCtx, entry.topic)
 	} else {
-		_ = entry.ps.Unsubscribe(unsubCtx, entry.topic)
+		unsubErr = entry.ps.Unsubscribe(unsubCtx, entry.topic)
 	}
-	_ = entry.ps.Close()
+	if unsubErr != nil && !errors.Is(unsubErr, redis.ErrClosed) && !errors.Is(unsubErr, context.Canceled) {
+		c.log().Warn("redis unsubscribe failed", "topic", entry.topic, "pattern", entry.isPattern, "err", unsubErr)
+	}
+	if closeErr := entry.ps.Close(); closeErr != nil && !errors.Is(closeErr, redis.ErrClosed) {
+		c.log().Warn("redis pubsub close failed", "topic", entry.topic, "err", closeErr)
+	}
 	entry.wg.Wait()
 	return nil
 }

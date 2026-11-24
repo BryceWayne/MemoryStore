@@ -1,6 +1,8 @@
 package azure
 
 import (
+	"log/slog"
+
 	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
 	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus/admin"
 )
@@ -22,6 +24,7 @@ type config struct {
 	channelBuffer      int
 	clientOptions      *azservicebus.ClientOptions
 	adminClientOptions *admin.ClientOptions
+	logger             *slog.Logger
 }
 
 func defaultConfig() config {
@@ -125,5 +128,13 @@ func WithClientOptions(opts *azservicebus.ClientOptions) Option {
 func WithAdminClientOptions(opts *admin.ClientOptions) Option {
 	return func(c *config) {
 		c.adminClientOptions = opts
+	}
+}
+
+// WithLogger sets an optional structured logger for background receive,
+// settlement, slow-consumer, and cleanup warnings. Nil loggers disable logging.
+func WithLogger(l *slog.Logger) Option {
+	return func(c *config) {
+		c.logger = l
 	}
 }

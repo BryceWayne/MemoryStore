@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"crypto/tls"
+	"log/slog"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/sasl"
@@ -17,12 +18,14 @@ type config struct {
 	saslMechanisms   []sasl.Mechanism
 	autoCreateTopics bool
 	kafkaOptions     []kgo.Opt
+	logger           *slog.Logger
 }
 
 func defaultConfig() config {
 	return config{
 		channelBuffer:    defaultChannelBuffer,
 		autoCreateTopics: true,
+		logger:           slog.New(slog.DiscardHandler),
 	}
 }
 
@@ -114,6 +117,17 @@ func WithKafkaOptions(opts ...kgo.Opt) Option {
 			if opt != nil {
 				c.kafkaOptions = append(c.kafkaOptions, opt)
 			}
+		}
+	}
+}
+
+// WithLogger sets a structured logger for background fetch errors, offset commit
+// and group leave failures, and metadata retry diagnostics. Nil loggers are
+// ignored, preserving the default discard logger.
+func WithLogger(l *slog.Logger) Option {
+	return func(c *config) {
+		if l != nil {
+			c.logger = l
 		}
 	}
 }

@@ -6,7 +6,10 @@ import (
 )
 
 func TestMetrics(t *testing.T) {
-	ms := NewMemoryStore()
+	ms, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	defer func() {
 		_ = ms.Stop()
 	}()

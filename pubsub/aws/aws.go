@@ -6,6 +6,7 @@ import (
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strconv"
 	"strings"
@@ -31,6 +32,8 @@ const (
 	encodingAttributeKey  = "memorystore_encoding"
 	encodingBase64Value   = "base64"
 )
+
+var discardLogger = slog.New(slog.DiscardHandler)
 
 // Common errors returned by the AWS SNS + SQS Pub/Sub client.
 var (
@@ -131,11 +134,25 @@ func hasRegionOrEndpoint(region string, baseEndpoint *string) bool {
 	return region != "" || (baseEndpoint != nil && *baseEndpoint != "")
 }
 
+func (c *Client) log() *slog.Logger {
+	if c.cfg.logger != nil {
+		return c.cfg.logger
+	}
+	return discardLogger
+}
+
+func validateQueueURL(raw string) error {
+	u, err := url.ParseRequestURI(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("%w: %q", ErrInvalidQueueURL, raw)
+	}
+	return nil
+}
+
 func validateConfig(cfg config) error {
 	if cfg.queueURL != "" {
-		u, err := url.ParseRequestURI(cfg.queueURL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return fmt.Errorf("%w: %q", ErrInvalidQueueURL, cfg.queueURL)
+		if err := validateQueueURL(cfg.queueURL); err != nil {
+			return err
 		}
 	}
 	if cfg.topicARN != "" {
@@ -145,6 +162,23 @@ func validateConfig(cfg config) error {
 		}
 	}
 	return nil
+}
+
+func (c *Client) resolveQueueURL(topic string) (string, error) {
+	var raw string
+	switch {
+	case c.cfg.queueURLFunc != nil:
+		raw = c.cfg.queueURLFunc(topic)
+	case c.cfg.queueURL != "":
+		raw = c.cfg.queueURL
+	}
+	if raw == "" {
+		return "", ErrMissingQueueURL
+	}
+	if err := validateQueueURL(raw); err != nil {
+		return "", err
+	}
+	return raw, nil
 }
 
 func (c *Client) resolveTopicARN(ctx context.Context, topic string) (string, error) {
@@ -205,6 +239,20 @@ func (c *Client) Subscribe(ctx context.Context, topic string) (<-chan []byte, er
 		return nil, ErrInvalidTopic
 	}
 
+	autoManaged := c.cfg.shouldAutoManage()
+	var (
+		topicARN string
+		queueURL string
+		subARN   string
+	)
+	if !autoManaged {
+		var err error
+		queueURL, err = c.resolveQueueURL(topic)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -216,23 +264,13 @@ func (c *Client) Subscribe(ctx context.Context, topic string) (<-chan []byte, er
 
 	if existing != nil {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), defaultCleanupTimeout)
-		_ = c.stopSubscription(cleanupCtx, existing)
+		if stopErr := c.stopSubscription(cleanupCtx, existing); stopErr != nil {
+			c.log().Warn("aws pubsub failed to stop previous subscription on resubscribe", "topic", topic, "queue_url", existing.queueURL, "err", stopErr)
+		}
 		cancel()
 	}
 
-	autoManaged := c.cfg.shouldAutoManage()
-	var (
-		topicARN string
-		queueURL string
-		subARN   string
-	)
-
-	if !autoManaged {
-		if c.cfg.queueURL == "" {
-			return nil, ErrMissingQueueURL
-		}
-		queueURL = c.cfg.queueURL
-	} else {
+	if autoManaged {
 		var err error
 		topicARN, err = c.resolveTopicARN(ctx, topic)
 		if err != nil {
@@ -337,7 +375,9 @@ func (c *Client) Subscribe(ctx context.Context, topic string) (<-chan []byte, er
 
 	if prev != nil {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), defaultCleanupTimeout)
-		_ = c.stopSubscription(cleanupCtx, prev)
+		if stopErr := c.stopSubscription(cleanupCtx, prev); stopErr != nil {
+			c.log().Warn("aws pubsub failed to stop superseded subscription", "topic", topic, "queue_url", prev.queueURL, "err", stopErr)
+		}
 		cancel()
 	}
 
@@ -360,6 +400,7 @@ func (c *Client) receiveLoop(ctx context.Context, queueURL string, waitSecs, max
 			if ctx.Err() != nil {
 				return
 			}
+			c.log().Warn("aws sqs receive failed; retrying with backoff", "queue_url", queueURL, "retry_delay", retryDelay, "err", err)
 			timer := time.NewTimer(retryDelay)
 			select {
 			case <-timer.C:
@@ -373,17 +414,27 @@ func (c *Client) receiveLoop(ctx context.Context, queueURL string, waitSecs, max
 		retryDelay = initialRetryDelay
 
 		for _, msg := range out.Messages {
-			payload := extractPayload(msg)
+			payload, decErr := extractPayloadWithErr(msg)
+			if decErr != nil {
+				c.log().Warn("aws sqs failed to decode base64 payload; delivering raw body", "queue_url", queueURL, "err", decErr)
+			}
 			select {
 			case ch <- payload:
-				if handle := aws.ToString(msg.ReceiptHandle); handle != "" {
-					_, _ = c.sqs.DeleteMessage(ctx, &sqs.DeleteMessageInput{
-						QueueUrl:      aws.String(queueURL),
-						ReceiptHandle: aws.String(handle),
-					})
+			default:
+				c.log().Warn("aws pubsub subscriber buffer full; blocking delivery", "queue_url", queueURL, "buffer", cap(ch))
+				select {
+				case ch <- payload:
+				case <-ctx.Done():
+					return
 				}
-			case <-ctx.Done():
-				return
+			}
+			if handle := aws.ToString(msg.ReceiptHandle); handle != "" {
+				if _, delErr := c.sqs.DeleteMessage(ctx, &sqs.DeleteMessageInput{
+					QueueUrl:      aws.String(queueURL),
+					ReceiptHandle: aws.String(handle),
+				}); delErr != nil && ctx.Err() == nil {
+					c.log().Warn("aws sqs delete message failed", "queue_url", queueURL, "err", delErr)
+				}
 			}
 		}
 	}
@@ -498,7 +549,9 @@ func (c *Client) stopSubscription(ctx context.Context, entry *awsSubscription) e
 func (c *Client) cleanupEphemeralResources(queueURL, subARN string) {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), defaultCleanupTimeout)
 	defer cancel()
-	_ = c.deleteManagedResources(cleanupCtx, queueURL, subARN)
+	if err := c.deleteManagedResources(cleanupCtx, queueURL, subARN); err != nil {
+		c.log().Warn("aws pubsub failed to clean up ephemeral resources", "queue_url", queueURL, "sub_arn", subARN, "err", err)
+	}
 }
 
 func (c *Client) deleteManagedResources(ctx context.Context, queueURL, subARN string) error {
@@ -622,6 +675,11 @@ type snsEnvelopeAttr struct {
 }
 
 func extractPayload(msg sqstypes.Message) []byte {
+	payload, _ := extractPayloadWithErr(msg)
+	return payload
+}
+
+func extractPayloadWithErr(msg sqstypes.Message) ([]byte, error) {
 	body := aws.ToString(msg.Body)
 	isBase64 := false
 	if attr, ok := msg.MessageAttributes[encodingAttributeKey]; ok &&
@@ -645,9 +703,11 @@ func extractPayload(msg sqstypes.Message) []byte {
 	}
 
 	if isBase64 {
-		if decoded, err := base64.StdEncoding.DecodeString(body); err == nil {
-			return decoded
+		decoded, err := base64.StdEncoding.DecodeString(body)
+		if err == nil {
+			return decoded, nil
 		}
+		return []byte(body), err
 	}
-	return []byte(body)
+	return []byte(body), nil
 }

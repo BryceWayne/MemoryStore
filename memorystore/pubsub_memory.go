@@ -2,8 +2,10 @@ package memorystore
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // defaultChannelBuffer is the buffer capacity for subscriber channels.
@@ -26,6 +28,7 @@ type InMemoryPubSub struct {
 	wildcardSubs map[string][]*subscription // Wildcard patterns containing '*'
 	wg           sync.WaitGroup             // Tracks subscription cleanup goroutines
 	closed       bool
+	dropped      atomic.Int64 // Count of messages dropped due to full subscriber channels
 }
 
 // NewInMemoryPubSub creates and initializes a new InMemoryPubSub broker.
@@ -100,20 +103,20 @@ func (ps *InMemoryPubSub) Publish(ctx context.Context, topic string, message []b
 
 	// Fast O(1) lookup for exact-topic subscribers.
 	if subs, ok := ps.exactSubs[topic]; ok {
-		deliverToSubscribers(subs, message)
+		ps.deliverToSubscribers(subs, message)
 	}
 
 	// Evaluate wildcard patterns only when wildcard subscribers exist.
 	for pattern, subs := range ps.wildcardSubs {
 		if matchesTopic(topic, pattern) {
-			deliverToSubscribers(subs, message)
+			ps.deliverToSubscribers(subs, message)
 		}
 	}
 
 	return nil
 }
 
-func deliverToSubscribers(subs []*subscription, message []byte) {
+func (ps *InMemoryPubSub) deliverToSubscribers(subs []*subscription, message []byte) {
 	for _, sub := range subs {
 		select {
 		case <-sub.ctx.Done():
@@ -122,10 +125,34 @@ func deliverToSubscribers(subs []*subscription, message []byte) {
 			select {
 			case sub.ch <- message:
 			default:
-				// Channel is full, skip this subscriber.
+				// Channel is full, skip this subscriber and record the drop.
+				ps.dropped.Add(1)
 			}
 		}
 	}
+}
+
+// DroppedCount returns the total number of message deliveries skipped because
+// a subscriber's buffered channel was full.
+func (ps *InMemoryPubSub) DroppedCount() int64 {
+	return ps.dropped.Load()
+}
+
+// Ping implements Pinger, reporting ErrStoreStopped if the broker is closed.
+func (ps *InMemoryPubSub) Ping(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("nil context")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	ps.mu.RLock()
+	closed := ps.closed
+	ps.mu.RUnlock()
+	if closed {
+		return ErrStoreStopped
+	}
+	return nil
 }
 
 // Unsubscribe cancels all active subscriptions for the given topic or pattern.

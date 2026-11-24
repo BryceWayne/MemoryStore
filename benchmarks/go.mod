@@ -4,10 +4,10 @@ go 1.27.0
 
 toolchain go1.27.4
 
-replace github.com/BryceWayne/MemoryStore => ..
+replace github.com/BryceWayne/MemoryStore/v2 => ..
 
 require (
-	github.com/BryceWayne/MemoryStore v0.0.0-00010101000000-000000000000
+	github.com/BryceWayne/MemoryStore/v2 v2.0.0-00010101000000-000000000000
 	github.com/allegro/bigcache/v3 v3.2.0
 	github.com/coocood/freecache v1.2.7
 	github.com/dgraph-io/ristretto/v2 v2.4.2

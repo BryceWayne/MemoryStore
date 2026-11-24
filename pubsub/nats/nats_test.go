@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"runtime/pprof"
 	"slices"
 	"strings"
@@ -1410,7 +1411,7 @@ func TestClient_JetStreamSlowConsumerNakAndRedeliver(t *testing.T) {
 	outCh := make(chan []byte, 4)
 	var loopWG sync.WaitGroup
 	loopWG.Go(func() {
-		runJetStreamLoop(recvCtx, wrapMsgs, false, outCh)
+		runJetStreamLoop(recvCtx, "nak.retry", wrapMsgs, false, outCh, nil)
 	})
 
 	// Wait past one jsReceiveRetryDelay so Next() retries and recovers.
@@ -1691,7 +1692,7 @@ func TestClient_JetStreamConcurrentLifecycleAndLeaks(t *testing.T) {
 			nc.Close()
 			t.Fatalf("SubscribeSync() error = %v", err)
 		}
-		cleanupPendingSub(sub, nil)
+		cleanupPendingSub(sub, nil, nil)
 		if sub.IsValid() {
 			t.Error("expected cleanupPendingSub to unsubscribe core *nats.Subscription")
 		}
@@ -1787,6 +1788,267 @@ func (w *retryStreamInfoWrapper) Info(ctx context.Context, opts ...jetstream.Str
 	return w.Stream.Info(ctx, opts...)
 }
 
+type natsLogEntry struct {
+	level   slog.Level
+	message string
+	attrs   map[string]string
+}
+
+type natsCaptureHandler struct {
+	mu      sync.Mutex
+	entries []natsLogEntry
+}
+
+func (h *natsCaptureHandler) Enabled(_ context.Context, lvl slog.Level) bool {
+	return lvl >= slog.LevelDebug
+}
+
+func (h *natsCaptureHandler) Handle(_ context.Context, r slog.Record) error {
+	attrs := make(map[string]string)
+	r.Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value.String()
+		return true
+	})
+	h.mu.Lock()
+	h.entries = append(h.entries, natsLogEntry{
+		level:   r.Level,
+		message: r.Message,
+		attrs:   attrs,
+	})
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *natsCaptureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *natsCaptureHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *natsCaptureHandler) hasWarn(substr string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, e := range h.entries {
+		if e.level == slog.LevelWarn && strings.Contains(e.message, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *natsCaptureHandler) snapshot() []natsLogEntry {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]natsLogEntry(nil), h.entries...)
+}
+
+type fakeJSMsg struct {
+	jetstream.Msg
+	data         []byte
+	doubleAckErr error
+	nakErr       error
+}
+
+func (m *fakeJSMsg) Data() []byte { return m.data }
+
+func (m *fakeJSMsg) DoubleAck(context.Context) error { return m.doubleAckErr }
+
+func (m *fakeJSMsg) Nak() error { return m.nakErr }
+
+type fakeJSMsgsCtx struct {
+	jetstream.MessagesContext
+	mu      sync.Mutex
+	items   []fakeNextItem
+	stopped atomic.Bool
+}
+
+type fakeNextItem struct {
+	msg jetstream.Msg
+	err error
+}
+
+func (f *fakeJSMsgsCtx) Next(opts ...jetstream.NextOpt) (jetstream.Msg, error) {
+	_ = opts
+	f.mu.Lock()
+	if len(f.items) > 0 {
+		item := f.items[0]
+		f.items = f.items[1:]
+		f.mu.Unlock()
+		return item.msg, item.err
+	}
+	f.mu.Unlock()
+	return nil, jetstream.ErrMsgIteratorClosed
+}
+
+func (f *fakeJSMsgsCtx) Stop() { f.stopped.Store(true) }
+
+func TestWithLoggerAndDroppedCount(t *testing.T) {
+	t.Run("NilLoggerIsSafe", func(t *testing.T) {
+		ns := startTestNATSServer(t, false)
+		c, err := NewClient(ns.ClientURL(), WithLogger(nil))
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		defer func() { _ = c.Close() }()
+		c.log().Warn("discarded")
+
+		zeroClient := &Client{}
+		zeroClient.log().Warn("discarded")
+		if got := zeroClient.DroppedCount(); got != 0 {
+			t.Errorf("zeroClient.DroppedCount() = %d, want 0", got)
+		}
+	})
+
+	t.Run("CoreDropsUpdateDroppedCountAndLogWarn", func(t *testing.T) {
+		ctx := t.Context()
+		ns := startTestNATSServer(t, false)
+		handler := &natsCaptureHandler{}
+		c, err := NewClient(
+			ns.ClientURL(),
+			WithChannelBuffer(1),
+			WithLogger(slog.New(handler)),
+		)
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		defer func() { _ = c.Close() }()
+
+		ch, err := c.Subscribe(ctx, "drop.topic")
+		if err != nil {
+			t.Fatalf("Subscribe() error = %v", err)
+		}
+
+		const total = 10
+		for i := range total {
+			if err := c.Publish(ctx, "drop.topic", []byte(fmt.Sprintf("m-%d", i))); err != nil {
+				t.Fatalf("Publish(%d) error = %v", i, err)
+			}
+		}
+
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if c.DroppedCount() > 0 && handler.hasWarn("dropping message") {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if c.DroppedCount() == 0 {
+			t.Fatalf("DroppedCount() = 0, want > 0 when channel buffer=1 and %d messages published", total)
+		}
+		if !handler.hasWarn("dropping message") {
+			t.Errorf("expected drop warning log, got %+v", handler.snapshot())
+		}
+
+		// Drain buffered message and close cleanly.
+		select {
+		case <-ch:
+		case <-time.After(time.Second):
+			t.Fatal("expected at least 1 buffered message")
+		}
+		if err := c.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+		assertNoGoroutineLeaks(t)
+	})
+
+	t.Run("ErrSlowConsumerLogsWarn", func(t *testing.T) {
+		ns := startTestNATSServer(t, false)
+		handler := &natsCaptureHandler{}
+		nc, err := nats.Connect(ns.ClientURL())
+		if err != nil {
+			t.Fatalf("nats.Connect() error = %v", err)
+		}
+		defer nc.Close()
+
+		sub, err := nc.SubscribeSync("slow.nats")
+		if err != nil {
+			t.Fatalf("SubscribeSync() error = %v", err)
+		}
+		if err := sub.SetPendingLimits(1, 1); err != nil {
+			t.Fatalf("SetPendingLimits() error = %v", err)
+		}
+		if err := nc.Flush(); err != nil {
+			t.Fatalf("Flush() error = %v", err)
+		}
+
+		// Publish enough messages before reading so client subscription overflows -> ErrSlowConsumer.
+		pub, err := nats.Connect(ns.ClientURL())
+		if err != nil {
+			t.Fatalf("nats.Connect(pub) error = %v", err)
+		}
+		defer pub.Close()
+		for i := range 50 {
+			if err := pub.Publish("slow.nats", []byte(fmt.Sprintf("payload-%03d", i))); err != nil {
+				t.Fatalf("Publish() error = %v", err)
+			}
+		}
+		_ = pub.Flush()
+		time.Sleep(30 * time.Millisecond)
+
+		recvCtx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		outCh := make(chan []byte, 64)
+		var dropped atomic.Int64
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			runCoreLoop(recvCtx, "slow.nats", sub, outCh, &dropped, slog.New(handler))
+		})
+
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if handler.hasWarn("core nats slow consumer") {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		cancel()
+		wg.Wait()
+
+		if !handler.hasWarn("core nats slow consumer") {
+			t.Errorf("expected ErrSlowConsumer warn log, got %+v", handler.entries)
+		}
+	})
+
+	t.Run("JetStreamNextRetryDoubleAckAndNakLogWarn", func(t *testing.T) {
+		handler := &natsCaptureHandler{}
+		// 1. Next retry + DoubleAck error
+		msgs1 := &fakeJSMsgsCtx{
+			items: []fakeNextItem{
+				{err: errors.New("transient next error")},
+				{msg: &fakeJSMsg{data: []byte("m1"), doubleAckErr: errors.New("ack boom")}},
+			},
+		}
+		out1 := make(chan []byte, 1)
+		runJetStreamLoop(t.Context(), "js.topic", msgs1, true, out1, slog.New(handler))
+		if got := string(<-out1); got != "m1" {
+			t.Fatalf("received %q, want m1", got)
+		}
+
+		// 2. Nak error on canceled context with full outCh
+		msgs2 := &fakeJSMsgsCtx{
+			items: []fakeNextItem{
+				{msg: &fakeJSMsg{data: []byte("m2"), nakErr: errors.New("nak boom")}},
+			},
+		}
+		recvCtx, cancel := context.WithCancel(t.Context())
+		out2 := make(chan []byte) // unbuffered -> blocks until cancel
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			runJetStreamLoop(recvCtx, "js.topic", msgs2, true, out2, slog.New(handler))
+		})
+		time.Sleep(15 * time.Millisecond)
+		cancel()
+		wg.Wait()
+
+		for _, want := range []string{
+			"jetstream receive error; retrying",
+			"jetstream double-ack failed",
+			"jetstream nak failed",
+		} {
+			if !handler.hasWarn(want) {
+				t.Errorf("expected warn %q, got %+v", want, handler.entries)
+			}
+		}
+	})
+}
+
 // Compile-time structural check that Client satisfies memorystore.PubSubClient.
 type pubSubContract interface {
 	Subscribe(ctx context.Context, topic string) (<-chan []byte, error)
@@ -1796,3 +2058,294 @@ type pubSubContract interface {
 }
 
 var _ pubSubContract = (*Client)(nil)
+
+func TestClient_CoreStopTimeoutAndDrainErrorPaths(t *testing.T) {
+	ctx := t.Context()
+	ns := startTestNATSServer(t, false)
+	handler := &natsCaptureHandler{}
+
+	c, err := NewClient(
+		ns.ClientURL(),
+		WithDrainTimeout(20*time.Millisecond),
+		WithLogger(slog.New(handler)),
+	)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	ch, err := c.Subscribe(ctx, "timeout.topic")
+	if err != nil {
+		_ = c.Close()
+		t.Fatalf("Subscribe() error = %v", err)
+	}
+
+	// Expired deadline exercises timeout <= 0 fast-exit path in stopSubscription.
+	pastCtx, cancel := context.WithDeadline(ctx, time.Now().Add(-time.Millisecond))
+	defer cancel()
+	c.mu.Lock()
+	entry := c.subscriptions["timeout.topic"]
+	delete(c.subscriptions, "timeout.topic")
+	c.mu.Unlock()
+	if err := c.stopSubscription(pastCtx, entry); err != nil {
+		t.Fatalf("stopSubscription(expired deadline) error = %v", err)
+	}
+	assertChannelClosed(t, ch, 2*time.Second)
+
+	// setupCoreSubscription flushWithContext error rolls back subscription.
+	if _, err := c.setupCoreSubscription(pastCtx, "flush.rollback"); err == nil {
+		t.Fatal("expected setupCoreSubscription with expired deadline to fail on flush")
+	}
+
+	// Drain() error fallback in stopSubscription (ErrConnectionClosed after conn.Close()).
+	ch2, err := c.Subscribe(ctx, "drain.err.topic")
+	if err != nil {
+		t.Fatalf("Subscribe(drain.err.topic) error = %v", err)
+	}
+	c.conn.Close()
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close() on closed conn error = %v", err)
+	}
+	assertChannelClosed(t, ch2, 2*time.Second)
+	assertNoGoroutineLeaks(t)
+}
+
+func TestClient_CloseDrainTimeoutAndReconnectingPaths(t *testing.T) {
+	ctx := t.Context()
+
+	t.Run("DrainTimeoutForcesClose", func(t *testing.T) {
+		ns := startTestNATSServer(t, false)
+		handler := &natsCaptureHandler{}
+		c, err := NewClient(
+			ns.ClientURL(),
+			WithDrainTimeout(time.Nanosecond),
+			WithLogger(slog.New(handler)),
+		)
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		if _, err := c.Subscribe(ctx, "drain.timeout"); err != nil {
+			_ = c.Close()
+			t.Fatalf("Subscribe() error = %v", err)
+		}
+		if err := c.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+		if !c.conn.IsClosed() {
+			t.Error("expected connection to be closed after Close()")
+		}
+		assertNoGoroutineLeaks(t)
+	})
+
+	t.Run("ReconnectingConnClose", func(t *testing.T) {
+		ns := startTestNATSServer(t, false)
+		reconnCh := make(chan struct{}, 1)
+		c, err := NewClient(
+			ns.ClientURL(),
+			WithDrainTimeout(50*time.Millisecond),
+			WithNATSOptions(
+				nats.MaxReconnects(-1),
+				nats.ReconnectWait(500*time.Millisecond),
+				nats.DisconnectErrHandler(func(_ *nats.Conn, _ error) {
+					select {
+					case reconnCh <- struct{}{}:
+					default:
+					}
+				}),
+			),
+		)
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		ns.Shutdown()
+		select {
+		case <-reconnCh:
+		case <-time.After(3 * time.Second):
+			_ = c.Close()
+			t.Fatal("timed out waiting for disconnect/reconnecting state")
+		}
+		if err := c.Close(); err != nil {
+			t.Fatalf("Close() while reconnecting error = %v", err)
+		}
+		assertNoGoroutineLeaks(t)
+	})
+
+	t.Run("DrainFallbackClosesChannelCleanly", func(t *testing.T) {
+		ns := startTestNATSServer(t, false)
+		c, err := NewClient(ns.ClientURL(), WithDrainTimeout(5*time.Millisecond))
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		defer func() { _ = c.Close() }()
+
+		ch, err := c.Subscribe(ctx, "draining.conn.sub")
+		if err != nil {
+			t.Fatalf("Subscribe() error = %v", err)
+		}
+		if err := c.conn.Drain(); err != nil {
+			t.Fatalf("conn.Drain() error = %v", err)
+		}
+		c.mu.Lock()
+		entry := c.subscriptions["draining.conn.sub"]
+		delete(c.subscriptions, "draining.conn.sub")
+		c.mu.Unlock()
+		if err := c.stopSubscription(ctx, entry); err != nil {
+			t.Fatalf("stopSubscription() error = %v", err)
+		}
+		assertChannelClosed(t, ch, 2*time.Second)
+	})
+}
+
+type stubJSStream struct {
+	jetstream.Stream
+	cachedInfo *jetstream.StreamInfo
+	infoFn     func(context.Context) (*jetstream.StreamInfo, error)
+}
+
+func (s *stubJSStream) CachedInfo() *jetstream.StreamInfo { return s.cachedInfo }
+
+func (s *stubJSStream) Info(ctx context.Context, _ ...jetstream.StreamInfoOpt) (*jetstream.StreamInfo, error) {
+	return s.infoFn(ctx)
+}
+
+type stubJetStream struct {
+	jetstream.JetStream
+	streamFn             func(context.Context, string) (jetstream.Stream, error)
+	createStreamFn       func(context.Context, jetstream.StreamConfig) (jetstream.Stream, error)
+	createOrUpdateStream func(context.Context, jetstream.StreamConfig) (jetstream.Stream, error)
+}
+
+func (s *stubJetStream) Stream(ctx context.Context, name string) (jetstream.Stream, error) {
+	return s.streamFn(ctx, name)
+}
+
+func (s *stubJetStream) CreateStream(ctx context.Context, cfg jetstream.StreamConfig) (jetstream.Stream, error) {
+	return s.createStreamFn(ctx, cfg)
+}
+
+func (s *stubJetStream) CreateOrUpdateStream(ctx context.Context, cfg jetstream.StreamConfig) (jetstream.Stream, error) {
+	return s.createOrUpdateStream(ctx, cfg)
+}
+
+func TestClient_JetStreamEnsureStreamErrorPaths(t *testing.T) {
+	ctx := t.Context()
+	// Core-only server (JetStream disabled) -> ensureStream returns ErrJetStreamNotEnabled.
+	ns := startTestNATSServer(t, false)
+	c, err := NewClient(ns.ClientURL(), WithJetStream("NO_JS"))
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	if _, err := c.Subscribe(ctx, "js.disabled"); !errors.Is(err, jetstream.ErrJetStreamNotEnabled) {
+		t.Fatalf("Subscribe on non-JS server = %v, want ErrJetStreamNotEnabled", err)
+	}
+
+	// Unit tests for ensureStream retry and error branches via stubJetStream.
+	mkClient := func(js jetstream.JetStream) *Client {
+		return &Client{
+			js:            js,
+			cfg:           config{streamName: "S", jsAutoCreate: true, jsStorageSet: true, jsStorage: jetstream.MemoryStorage, logger: slog.New(&natsCaptureHandler{})},
+			subscriptions: make(map[string]*natsSubscription),
+		}
+	}
+
+	t.Run("InfoRetryThenFail", func(t *testing.T) {
+		calls := 0
+		sc := mkClient(&stubJetStream{
+			streamFn: func(context.Context, string) (jetstream.Stream, error) {
+				return &stubJSStream{
+					infoFn: func(context.Context) (*jetstream.StreamInfo, error) {
+						calls++
+						if calls == 1 {
+							return nil, jetstream.ErrStreamNameAlreadyInUse
+						}
+						return nil, errors.New("fatal info error")
+					},
+				}, nil
+			},
+		})
+		if _, err := sc.ensureStream(ctx, "t.a"); err == nil || calls != 2 {
+			t.Fatalf("ensureStream = %v (calls=%d), want fatal info error after 2 calls", err, calls)
+		}
+	})
+
+	t.Run("CreateOrUpdateRetryAndVerifyFallback", func(t *testing.T) {
+		var updateCalls int
+		inVerify := false
+		updatedStub := &stubJSStream{cachedInfo: &jetstream.StreamInfo{Config: jetstream.StreamConfig{Subjects: []string{"t.b"}}}}
+		sc := mkClient(&stubJetStream{
+			streamFn: func(context.Context, string) (jetstream.Stream, error) {
+				if inVerify {
+					inVerify = false
+					return nil, errors.New("verify lookup transient")
+				}
+				return &stubJSStream{cachedInfo: &jetstream.StreamInfo{Config: jetstream.StreamConfig{Subjects: []string{"t.a"}}}}, nil
+			},
+			createOrUpdateStream: func(context.Context, jetstream.StreamConfig) (jetstream.Stream, error) {
+				updateCalls++
+				if updateCalls == 1 {
+					return nil, jetstream.ErrStreamNameAlreadyInUse
+				}
+				inVerify = true
+				return updatedStub, nil
+			},
+		})
+		got, err := sc.ensureStream(ctx, "t.b")
+		if err != nil || got != jetstream.Stream(updatedStub) {
+			t.Fatalf("ensureStream = (%v, %v), want updatedStub", got, err)
+		}
+
+		// Non-retryable CreateOrUpdateStream error returns immediately.
+		scFail := mkClient(&stubJetStream{
+			streamFn: func(context.Context, string) (jetstream.Stream, error) {
+				return &stubJSStream{cachedInfo: &jetstream.StreamInfo{Config: jetstream.StreamConfig{Subjects: []string{"t.a"}}}}, nil
+			},
+			createOrUpdateStream: func(context.Context, jetstream.StreamConfig) (jetstream.Stream, error) {
+				return nil, errors.New("update denied")
+			},
+		})
+		if _, err := scFail.ensureStream(ctx, "t.b"); err == nil {
+			t.Fatal("expected non-retryable update error")
+		}
+	})
+
+	t.Run("CreateStreamRetryAndVerifyFallback", func(t *testing.T) {
+		var createCalls int
+		inVerify := false
+		createdStub := &stubJSStream{cachedInfo: &jetstream.StreamInfo{Config: jetstream.StreamConfig{Subjects: []string{"t.c"}}}}
+		sc := mkClient(&stubJetStream{
+			streamFn: func(context.Context, string) (jetstream.Stream, error) {
+				if inVerify {
+					inVerify = false
+					return nil, errors.New("verify failed")
+				}
+				return nil, jetstream.ErrStreamNotFound
+			},
+			createStreamFn: func(context.Context, jetstream.StreamConfig) (jetstream.Stream, error) {
+				createCalls++
+				if createCalls == 1 {
+					return nil, jetstream.ErrStreamNameAlreadyInUse
+				}
+				inVerify = true
+				return createdStub, nil
+			},
+		})
+		got, err := sc.ensureStream(ctx, "t.c")
+		if err != nil || got != jetstream.Stream(createdStub) {
+			t.Fatalf("ensureStream = (%v, %v), want createdStub", got, err)
+		}
+
+		// Non-retryable CreateStream error returns immediately.
+		scFail := mkClient(&stubJetStream{
+			streamFn: func(context.Context, string) (jetstream.Stream, error) {
+				return nil, jetstream.ErrStreamNotFound
+			},
+			createStreamFn: func(context.Context, jetstream.StreamConfig) (jetstream.Stream, error) {
+				return nil, errors.New("create denied")
+			},
+		})
+		if _, err := scFail.ensureStream(ctx, "t.c"); err == nil {
+			t.Fatal("expected non-retryable create error")
+		}
+	})
+}

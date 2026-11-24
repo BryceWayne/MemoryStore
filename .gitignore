@@ -1,5 +1,6 @@
 # Build artifacts
 /memory_store
+/basic
 *.exe
 *.exe~
 *.dll
@@ -23,3 +24,6 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+# Go workspace sum (auto-generated when go.work is active)
+go.work.sum

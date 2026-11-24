@@ -21,21 +21,27 @@ func TestDistributedInvalidation_TwoNodes(t *testing.T) {
 	defer func() { _ = sharedBroker.Close() }()
 
 	var nodeBEvicted sync.Map
-	nodeA := NewMemoryStoreWithConfig(Config{
-		PubSub:            sharedBroker,
-		InvalidationTopic: "cache:inv",
-	})
+	nodeA, err := New(
+		WithPubSub(sharedBroker),
+		WithInvalidationTopic("cache:inv"),
+	)
+	if err != nil {
+		t.Fatalf("New(nodeA) error = %v", err)
+	}
 	defer func() {
 		// Prevent closing sharedBroker prematurely while nodeB is active; stop both cleanly below.
 	}()
 
-	nodeB := NewMemoryStoreWithConfig(Config{
-		PubSub:            sharedBroker,
-		InvalidationTopic: "cache:inv",
-		OnEvict: func(key string, _ []byte, reason EvictReason) {
+	nodeB, err := New(
+		WithPubSub(sharedBroker),
+		WithInvalidationTopic("cache:inv"),
+		WithOnEvict(func(key string, _ []byte, reason EvictReason) {
 			nodeBEvicted.Store(key, reason)
-		},
-	})
+		}),
+	)
+	if err != nil {
+		t.Fatalf("New(nodeB) error = %v", err)
+	}
 
 	if nodeA.InstanceID() == "" || nodeB.InstanceID() == "" || nodeA.InstanceID() == nodeB.InstanceID() {
 		t.Fatalf("expected distinct non-empty instance IDs, got A=%q B=%q", nodeA.InstanceID(), nodeB.InstanceID())
@@ -58,7 +64,9 @@ func TestDistributedInvalidation_TwoNodes(t *testing.T) {
 	}
 
 	// Now nodeA deletes k1 -> nodeB must evict k1 and invoke OnEvict(EvictDeleted).
-	nodeA.Delete("k1")
+	if err := nodeA.Delete("k1"); err != nil {
+		t.Fatalf("nodeA.Delete() error = %v", err)
+	}
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		if _, ok := nodeB.Get("k1"); !ok {
@@ -117,7 +125,7 @@ func TestDistributedInvalidation_TwoNodes(t *testing.T) {
 		if err := prof.WriteTo(&buf, 1); err != nil {
 			t.Fatalf("goroutineleak WriteTo() error = %v", err)
 		}
-		if strings.Contains(buf.String(), "github.com/BryceWayne/MemoryStore/memorystore") {
+		if strings.Contains(buf.String(), "github.com/BryceWayne/MemoryStore/v2/memorystore") {
 			t.Errorf("detected leaked goroutine after stopping invalidation nodes:\n%s", buf.String())
 		}
 	}
@@ -131,7 +139,10 @@ func TestMemoryStore_GetJSONAs(t *testing.T) {
 		Name string `json:"name"`
 	}
 
-	ms := NewMemoryStore()
+	ms, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	defer func() { _ = ms.Stop() }()
 
 	// Miss
@@ -158,7 +169,10 @@ func TestMemoryStore_GetJSONAs(t *testing.T) {
 }
 
 func TestMemoryStore_GetOrLoad_Singleflight(t *testing.T) {
-	ms := NewMemoryStore()
+	ms, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	defer func() { _ = ms.Stop() }()
 
 	var calls atomic.Int32
@@ -242,7 +256,10 @@ func TestMemoryStore_GetOrLoadJSON_Singleflight(t *testing.T) {
 		Balance int    `json:"balance"`
 	}
 
-	ms := NewMemoryStore()
+	ms, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	defer func() { _ = ms.Stop() }()
 
 	var calls atomic.Int32
@@ -301,16 +318,20 @@ func TestMemoryStore_GetOrLoadJSON_Singleflight(t *testing.T) {
 func TestMemoryStore_MaxItemsAndOnEvict(t *testing.T) {
 	var capacityEvictions atomic.Int64
 	var ms *MemoryStore
-	ms = NewMemoryStoreWithConfig(Config{
-		MaxItems: 20,
-		OnEvict: func(_ string, _ []byte, reason EvictReason) {
+	var err error
+	ms, err = New(
+		WithMaxItems(20),
+		WithOnEvict(func(_ string, _ []byte, reason EvictReason) {
 			// Verify calling store methods inside OnEvict never deadlocks.
 			_ = ms.IsStopped()
 			if reason == EvictCapacity {
 				capacityEvictions.Add(1)
 			}
-		},
-	})
+		}),
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	defer func() { _ = ms.Stop() }()
 
 	for i := range 100 {
@@ -332,9 +353,10 @@ func TestMemoryStore_MaxItemsAndOnEvict(t *testing.T) {
 }
 
 func TestMemoryStore_MaxBytesAndUpdateTracking(t *testing.T) {
-	ms := NewMemoryStoreWithConfig(Config{
-		MaxBytes: 500,
-	})
+	ms, err := New(WithMaxBytes(500))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	defer func() { _ = ms.Stop() }()
 
 	val := bytes.Repeat([]byte("x"), 40)

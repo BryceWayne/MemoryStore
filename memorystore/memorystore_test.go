@@ -52,12 +52,15 @@ func TestMemoryStore_SetGet(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ms := NewMemoryStore()
+			ms, err := New()
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
 			defer func() {
 				_ = ms.Stop()
 			}()
 
-			err := ms.Set(tt.key, tt.value, tt.expiration)
+			err = ms.Set(tt.key, tt.value, tt.expiration)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Set() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -112,12 +115,15 @@ func TestMemoryStore_SetGetJSON(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ms := NewMemoryStore()
+			ms, err := New()
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
 			defer func() {
 				_ = ms.Stop()
 			}()
 
-			err := ms.SetJSON(tt.key, tt.value, tt.expiration)
+			err = ms.SetJSON(tt.key, tt.value, tt.expiration)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("SetJSON() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -142,7 +148,10 @@ func TestMemoryStore_SetGetJSON(t *testing.T) {
 
 // TestMemoryStore_Delete tests the Delete operation
 func TestMemoryStore_Delete(t *testing.T) {
-	ms := NewMemoryStore()
+	ms, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	defer func() {
 		_ = ms.Stop()
 	}()
@@ -161,7 +170,9 @@ func TestMemoryStore_Delete(t *testing.T) {
 
 	// Test deletion
 	for k := range testData {
-		ms.Delete(k)
+		if err := ms.Delete(k); err != nil {
+			t.Errorf("Delete(%s) error = %v", k, err)
+		}
 		if _, exists := ms.Get(k); exists {
 			t.Errorf("Delete() key %s should not exist after deletion", k)
 		}
@@ -170,7 +181,10 @@ func TestMemoryStore_Delete(t *testing.T) {
 
 // TestMemoryStore_Expiration tests expiration functionality
 func TestMemoryStore_Expiration(t *testing.T) {
-	ms := NewMemoryStore()
+	ms, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	defer func() {
 		_ = ms.Stop()
 	}()
@@ -199,7 +213,10 @@ func TestMemoryStore_Expiration(t *testing.T) {
 
 // TestMemoryStore_Stop tests the store shutdown functionality
 func TestMemoryStore_Stop(t *testing.T) {
-	ms := NewMemoryStore()
+	ms, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 
 	// Store a value
 	if err := ms.Set("key", []byte("value"), time.Minute); err != nil {
@@ -224,7 +241,10 @@ func TestMemoryStore_Stop(t *testing.T) {
 
 // TestMemoryStore_Concurrent tests concurrent access
 func TestMemoryStore_Concurrent(t *testing.T) {
-	ms := NewMemoryStore()
+	ms, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	defer func() {
 		_ = ms.Stop()
 	}()
@@ -250,7 +270,9 @@ func TestMemoryStore_Concurrent(t *testing.T) {
 				}
 
 				// Test Delete
-				ms.Delete(key)
+				if err := ms.Delete(key); err != nil {
+					t.Errorf("Concurrent Delete() error = %v", err)
+				}
 			}
 			done <- true
 		}(i)
@@ -264,7 +286,10 @@ func TestMemoryStore_Concurrent(t *testing.T) {
 
 // BenchmarkMemoryStore_SetGet benchmarks Set and Get operations
 func BenchmarkMemoryStore_SetGet(b *testing.B) {
-	ms := NewMemoryStore()
+	ms, err := New()
+	if err != nil {
+		b.Fatalf("New() error = %v", err)
+	}
 	defer func() {
 		_ = ms.Stop()
 	}()
@@ -385,12 +410,15 @@ func TestMemoryStore_SetJSON(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ms := NewMemoryStore()
+			ms, err := New()
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
 			defer func() {
 				_ = ms.Stop()
 			}()
 
-			err := ms.SetJSON(tt.key, tt.value, tt.expiration)
+			err = ms.SetJSON(tt.key, tt.value, tt.expiration)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("SetJSON() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -515,7 +543,10 @@ func TestMemoryStore_GetJSON(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ms := NewMemoryStore()
+			ms, err := New()
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
 			defer func() {
 				_ = ms.Stop()
 			}()

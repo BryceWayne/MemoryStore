@@ -49,17 +49,33 @@
 //
 // Client behavior can be tuned with WithChannelBuffer (default 100),
 // WithQueueGroup, WithCloseConn, WithNATSOptions, WithDrainTimeout,
-// WithJetStream, WithJetStreamDurable, WithJetStreamAutoCreate, and
-// WithJetStreamStorage.
+// WithLogger, WithJetStream, WithJetStreamDurable, WithJetStreamAutoCreate,
+// and WithJetStreamStorage. Call DroppedCount to inspect the number of Core
+// NATS messages dropped due to a full subscriber channel buffer.
 //
-// Example:
+// # Example
 //
-//	ps, err := nats.NewClient("nats://127.0.0.1:4222")
+//	import (
+//	    "github.com/BryceWayne/MemoryStore/v2/memorystore"
+//	    "github.com/BryceWayne/MemoryStore/pubsub/nats"
+//	)
+//
+//	ps, err := nats.NewClient("nats://127.0.0.1:4222",
+//	    nats.WithLogger(slog.Default()),
+//	)
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
-//	store := memorystore.NewMemoryStoreWithConfig(memorystore.Config{
-//	    PubSub: ps,
-//	})
+//	store, err := memorystore.New(memorystore.WithPubSub(ps))
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
 //	defer store.Stop()
+//
+// # Test Dependencies
+//
+// This module's go.mod requires github.com/nats-io/nats-server/v2 solely for
+// offline unit tests (*_test.go). Under Go 1.27's pruned module graph,
+// nats-server/v2 is excluded from production builds (go list -deps .) and from
+// downstream consumers' go.mod require lists.
 package nats

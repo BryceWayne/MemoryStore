@@ -1,7 +1,9 @@
 package memorystore
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"testing"
 	"time"
 )
@@ -54,7 +56,10 @@ func newBenchComplexStruct() benchComplexStruct {
 
 func newSilentBenchStore(b *testing.B) *MemoryStore {
 	b.Helper()
-	ms := NewMemoryStore()
+	ms, err := New()
+	if err != nil {
+		b.Fatal(err)
+	}
 	b.Cleanup(func() {
 		_ = ms.Stop()
 	})
@@ -117,6 +122,71 @@ func BenchmarkMemoryStore_GetParallel(b *testing.B) {
 			i++
 		}
 	})
+}
+
+func BenchmarkMemoryStore_GetParallel_NilRecorder(b *testing.B) {
+	ms, err := New(WithMetricsRecorder(nil))
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = ms.Stop() })
+
+	keys := make([]string, 1024)
+	val := []byte("benchmark payload value for memorystore")
+	for i := range keys {
+		keys[i] = fmt.Sprintf("bench-key-%d", i)
+		if err := ms.Set(keys[i], val, time.Minute); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			if _, ok := ms.Get(keys[i&1023]); !ok {
+				b.Fatal("expected hit")
+			}
+			i++
+		}
+	})
+}
+
+func benchmarkBoundedGetParallel(b *testing.B, pol EvictionPolicy) {
+	b.Helper()
+	ms, err := New(WithMaxItems(10_000), WithEvictionPolicy(pol))
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = ms.Stop() })
+
+	keys := make([]string, 1024)
+	val := []byte("benchmark payload value for memorystore")
+	for i := range keys {
+		keys[i] = fmt.Sprintf("bench-key-%d", i)
+		if err := ms.Set(keys[i], val, time.Minute); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			if _, ok := ms.Get(keys[i&1023]); !ok {
+				b.Fatal("expected hit")
+			}
+			i++
+		}
+	})
+}
+
+func BenchmarkMemoryStore_BoundedGetParallel_S3FIFO(b *testing.B) {
+	benchmarkBoundedGetParallel(b, EvictionS3FIFO)
+}
+
+func BenchmarkMemoryStore_BoundedGetParallel_TinyLFU(b *testing.B) {
+	benchmarkBoundedGetParallel(b, EvictionTinyLFU)
 }
 
 func BenchmarkMemoryStore_SetGetParallel(b *testing.B) {
@@ -261,5 +331,76 @@ func BenchmarkMemoryStore_PubSub_ExactManyTopics(b *testing.B) {
 		if err := ms.Publish("orders:region-42", msg); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+func BenchmarkMemoryStore_SnapshotSave_100K(b *testing.B) {
+	ms := newSilentBenchStore(b)
+	val := bytes.Repeat([]byte("a"), 256)
+	for i := range 100_000 {
+		if err := ms.Set(fmt.Sprintf("snap-key-%06d", i), val, time.Hour); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		format SnapshotFormat
+	}{
+		{"Binary", SnapshotBinary},
+		{"JSON", SnapshotJSON},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if err := ms.Save(io.Discard, WithSnapshotFormat(tc.format)); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkMemoryStore_SnapshotLoad_100K(b *testing.B) {
+	src := newSilentBenchStore(b)
+	val := bytes.Repeat([]byte("a"), 256)
+	for i := range 100_000 {
+		if err := src.Set(fmt.Sprintf("snap-key-%06d", i), val, time.Hour); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		format SnapshotFormat
+	}{
+		{"Binary", SnapshotBinary},
+		{"JSON", SnapshotJSON},
+	} {
+		var buf bytes.Buffer
+		if err := src.Save(&buf, WithSnapshotFormat(tc.format)); err != nil {
+			b.Fatal(err)
+		}
+		raw := buf.Bytes()
+
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				b.StopTimer()
+				dst, err := New()
+				if err != nil {
+					b.Fatal(err)
+				}
+				r := bytes.NewReader(raw)
+				b.StartTimer()
+				if err := dst.Load(r, WithSnapshotFormat(tc.format)); err != nil {
+					b.Fatal(err)
+				}
+				b.StopTimer()
+				_ = dst.Stop()
+			}
+		})
 	}
 }
